@@ -1,0 +1,31 @@
+PENNY SYSTEM – AUTONOMOUS DEVELOPMENT AGENT CHARTER
+====================================================
+
+Objective:
+Enable a semi-autonomous coding agent capable of iterating, debugging,
+testing, and refining the Penny-System repository with minimal human friction.
+
+Scope:
+- Read/write project files
+- Execute PowerShell / Python commands
+- Run regression tests
+- Validate Telegram output
+- Verify DB writes
+- Refactor code safely
+- Maintain ENV-only secret structure
+
+Milestones:
+1. Repository structural stabilization
+2. Regression test harness creation
+3. Execution logging system
+4. Automated test-run + validate loop
+5. Performance monitoring module
+
+Success Criteria:
+- Agent can detect and repair indentation/import errors
+- Agent can run notify_scan.py and confirm Telegram delivery
+- Agent can validate scoring + risk pipeline
+- Agent can propose structural improvements
+
+Governance:
+Human remains final execution authority.

@@ -1,0 +1,31 @@
+TRANSACTION COST & CHURN CONTROL ENGINE
+=======================================
+
+Problem:
+IBKR charges ~$2–$3 per transaction.
+Frequent position switching erodes capital.
+
+Solution Framework:
+
+1. Replacement Threshold Rule
+Only replace an existing position if:
+Expected Return_new - Expected Return_old > (2 × Transaction Fee)
+
+2. Minimum Expected Edge Rule
+For new BUY:
+(score_total_adj × confidence) must exceed churn-adjusted threshold.
+
+3. Holding Bias Factor
+Introduce holding_bonus:
+If already held position > 3 days:
+score_total += 3
+
+4. Churn Penalty
+If symbol replaced within last 48 hours:
+score_total -= 5
+
+Implementation Layer:
+To be integrated inside src_sizing or scoring normalization layer.
+
+Status:
+Conceptual – not yet implemented.

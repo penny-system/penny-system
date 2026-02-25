@@ -1,0 +1,10 @@
+# Off-topic Parking Lot
+- UI slowness: start new chat + upload docs pack
+- Task Scheduler auth: PIN vs password behavior
+- Misc Qs kept here so core build stays fast
+
+===================================================
+
+# OFFTOPIC
+- Keep this chat lean: no large code dumps unless requested.
+- Use step-by-step tasks; one file change at a time; test after each step.

@@ -1,0 +1,32 @@
+PENNY SYSTEM ARCHITECTURE
+=========================
+
+IBKR API
+   ↓
+Historical Bars
+   ↓
+src_features.py
+   ↓
+Feature Dictionary
+   ↓
+src_scoring.py  → score_total
+src_risk.py     → risk_score
+   ↓
+Decision Layer (BUY if ≥80)
+   ↓
+SQLite Storage (recommendations table)
+   ↓
+notify_scan.py
+   ↓
+Trigger A (Headline Severity)
+   ↓
+Trigger C (OpenAI Soft Gate)
+   ↓
+Telegram Alert
+   ↓
+Human Approve → approve.py
+
+Supporting Systems:
+- ENV Secret Management
+- Dedup State JSON
+- Failure Silence Window

@@ -1,0 +1,70 @@
+# Troubleshooting Log
+
+## 2026-02-20 — DB path confusion
+**Symptom:** approve.py says DB not found at Trader_bot\output\trader.sqlite  
+**Cause:** Running from different working directory or wrong DB_PATH default  
+**Fix:** Use --db-path output\trader.sqlite or set config.DB_PATH to output\trader.sqlite
+
+## 2026-02-20 — suggested_qty duplicate column
+**Symptom:** sqlite3 OperationalError: duplicate column name suggested_qty  
+**Cause:** Migration already applied  
+**Fix:** Treat migration as idempotent; don’t re-add column.
+
+## 2026-02-20 — fill_suggested_qty rowid error
+**Symptom:** IndexError: No item with that key (rowid)  
+**Cause:** SELECT didn’t include rowid alias or row_factory mismatch  
+**Fix:** Query rowid explicitly or use cursor fetch tuples and index.
+
+## 2026-02-20 — PURSE=0.0 in fill_suggested_qty
+**Symptom:** qty outputs 0 even with BUYs  
+**Cause:** Script reading wrong config key or defaulting to 0  
+**Fix:** Ensure TRADE_PURSE_USD is used; verify config import and values.
+
+## 2026-02-21 — Telegram chat id missing for scheduled notify
+**Symptom:** TELEGRAM_CHAT_ID is None; scheduled messages fail  
+**Fix:** Set TELEGRAM_CHAT_ID to numeric chat id in config.py (no quotes).
+
+## 2026-02-21 — Task Scheduler password prompt (PIN not accepted)
+**Symptom:** Task Scheduler asks for password; user only knows PIN  
+**Fix:** Create task using “Run only when user is logged on”.
+
+================================================================
+
+# TROUBLESHOOTING (as of 2026-02-21)
+
+## Telegram issues
+1) Missing python-telegram-bot:
+   - Fix: pip install python-telegram-bot
+
+2) "Conflict: terminated by other getUpdates request"
+   - Cause: more than one polling bot instance running
+   - Fix: stop other bot scripts / scheduled tasks; use one-time getUpdates method for Chat ID
+
+3) Chat ID missing
+   - Use print_chat_id.py method or Telegram getUpdates approach
+   - Confirmed chat ID: 8336838980
+
+## Marketaux issues
+- Verify key works:
+  - 200 response indicates OK
+- If headlines empty for a symbol:
+  - Try TSLA / AAPL / AMC to validate pipeline
+
+## IBKR / TWS connection issues
+1) Connection refused / port closed
+   - Ensure in TWS:
+     File → Global Configuration → API → Settings
+     - Enable ActiveX and Socket Clients = ON
+     - Socket port = 7497 (paper) or 7496 (live)
+   - Restart TWS
+   - Test:
+     Test-NetConnection 127.0.0.1 -Port 7497 => TcpTestSucceeded True
+
+2) If IBKR is down, hourly script should not crash
+   - notify_scan.py now sends concise Telegram warning and returns.
+
+## Common path mistakes
+- Running scripts from project root requires correct paths:
+  - main_daily_run.py is in Trader_bot\
+  - fill_suggested_qty.py is in Trader_bot\
+- notify_scan.py was updated accordingly.

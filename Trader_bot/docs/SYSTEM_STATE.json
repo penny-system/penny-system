@@ -1,0 +1,43 @@
+{
+  "generated_at": "2026-02-21 14:37:04",
+  "machine": {
+    "platform": "Windows-11-10.0.26100-SP0",
+    "python": "3.12.10"
+  },
+  "paths": {
+    "cwd": "C:\\Users\\kieyf\\penny-system",
+    "db_path": "C:\\Users\\kieyf\\penny-system\\Trader_bot\\docs\\output\\trader.sqlite"
+  },
+  "config": {
+    "AUTO_POSITION_SIZING": true,
+    "BASE_RISK_UNIT": 1.0,
+    "ENABLE_DYNAMIC_UNIVERSE": true,
+    "ENABLE_LOGGING": true,
+    "IB_CLIENT_ID": 12,
+    "IB_HOST": "127.0.0.1",
+    "IB_PORT": 7497,
+    "LOG_LEVEL": "INFO",
+    "MARKETAUX_API_KEY": "***REDACTED***",
+    "MARKET_DATA_TYPE": 1,
+    "MAX_POSITIONS": 6,
+    "MAX_POSITION_USD": 1000,
+    "MIN_POSITION_USD": 150,
+    "NEWS_LOOKBACK_HOURS": 72,
+    "OPENAI_API_KEY": "***REDACTED***",
+    "PURSE": 1500.0,
+    "REQUIRE_APPROVAL": true,
+    "RISK_WEIGHT": 0.4,
+    "SCORE_WEIGHT": 0.6,
+    "STATIC_POOL_MAX": 200,
+    "STOP_LOSS_PCT": 0.15,
+    "TAKE_PROFIT_PCT": 0.35,
+    "TELEGRAM_BOT_TOKEN": "***REDACTED***",
+    "TELEGRAM_CHAT_ID": "8336838980",
+    "TRADE_PURSE_USD": 1500.0
+  },
+  "db": {
+    "exists": false,
+    "path": "C:\\Users\\kieyf\\penny-system\\Trader_bot\\docs\\output\\trader.sqlite"
+  },
+  "objective": "Wire OpenAI QC triggers A & C; validate morning/hourly automation"
+}

@@ -1,0 +1,204 @@
+PENNY-SYSTEM MASTER WHITEPAPER
+==============================
+Version: 1.0
+Generated: 2026-02-22 22:35 UTC
+
+------------------------------------------------------------
+SECTION 1 — EXECUTIVE OVERVIEW
+------------------------------------------------------------
+
+Penny-System is a structured, semi-autonomous micro-cap portfolio engine
+built around disciplined scoring, risk governance, AI-assisted review,
+and capital protection.
+
+The system integrates:
+- IBKR API for market data
+- Feature engineering pipeline
+- Opportunity scoring engine
+- Structural risk engine
+- Position sizing logic
+- SQLite persistence
+- Telegram alerting
+- OpenAI Soft Gate (Trigger C)
+- Dedup + state management
+- ENV-only security architecture
+
+Ultimate Goal:
+Create a living penny-stock micro-fund management engine capable of
+operating with limited oversight and strong capital discipline.
+
+------------------------------------------------------------
+SECTION 2 — CAPITAL FRAMEWORK
+------------------------------------------------------------
+
+PURSE: User-defined capital allocation pool
+MAX_POSITIONS: Hard cap on concurrent holdings
+
+Design Philosophy:
+- Avoid churn due to IBKR ~$2–$3 fees
+- Favor persistence over unnecessary replacement
+- Apply structured decision gates before capital rotation
+
+------------------------------------------------------------
+SECTION 3 — ENGINE ARCHITECTURE
+------------------------------------------------------------
+
+IBKR → Bars → Features → Scoring → Risk → Decision → DB → Notify → AI Gate → Human Approve
+
+Core Components:
+- src_features.py
+- src_scoring.py
+- src_risk.py
+- src_sizing.py
+- notify_scan.py
+- approve.py
+- SQLite DB (recommendations table)
+- notify_state.json
+
+------------------------------------------------------------
+SECTION 4 — SCORING LOGIC
+------------------------------------------------------------
+
+score_total:
+Measures attractiveness based on momentum, setup type, and opportunity strength.
+
+risk_score:
+Measures structural danger:
+- Liquidity
+- Volume spikes
+- Extreme moves
+- Regime context
+- Correlation to holdings
+
+BUY threshold:
+score_total ≥ 80
+
+risk_score does NOT auto-block BUY.
+It informs Trigger C and future churn logic.
+
+------------------------------------------------------------
+SECTION 5 — TRIGGERS
+------------------------------------------------------------
+
+Trigger A:
+Headline contains 2+ risk keywords in same article.
+
+Trigger C:
+BUY candidate + Trigger A → OpenAI Soft Gate review.
+
+OpenAI returns:
+- APPROVE
+- HOLD
+- REDUCE
+- BLOCK
+- confidence
+- reasoning
+
+AI is advisory only.
+
+------------------------------------------------------------
+SECTION 6 — TRANSACTION COST ENGINE (DESIGN)
+------------------------------------------------------------
+
+Problem:
+Frequent trades erode returns.
+
+Proposed Rules:
+- Replacement only if expected edge > 2× fee
+- Holding bias bonus
+- 48-hour churn penalty
+- Confidence-weighted edge filter
+
+Status:
+Conceptual — pending implementation.
+
+------------------------------------------------------------
+SECTION 7 — NEWS INTEGRATION
+------------------------------------------------------------
+
+Current:
+News used for risk detection only.
+
+Future:
+Add opportunity catalysts:
+- FDA approvals
+- Earnings beats
+- Contract awards
+- M&A signals
+
+------------------------------------------------------------
+SECTION 8 — TELEGRAM & NOTIFICATION SYSTEM
+------------------------------------------------------------
+
+Modes:
+- Morning brief (full overview)
+- Hourly actionable alert
+
+Controls:
+- Dedup via run_id + signature
+- Trigger A dedup
+- Trigger C dedup
+- 24-hour pipeline failure silence
+
+------------------------------------------------------------
+SECTION 9 — SECURITY MODEL
+------------------------------------------------------------
+
+All secrets stored in .env:
+- OPENAI_API_KEY
+- TELEGRAM_BOT_TOKEN
+- TELEGRAM_CHAT_ID
+- MARKETAUX_API_KEY
+
+No secrets in config.py.
+
+------------------------------------------------------------
+SECTION 10 — DEVELOPMENT HISTORY SUMMARY
+------------------------------------------------------------
+
+Milestones Achieved:
+✓ IBKR integration
+✓ Feature computation
+✓ Scoring + Risk engine
+✓ SQLite persistence
+✓ Telegram alerts
+✓ Trigger A detection
+✓ OpenAI Soft Gate wiring
+✓ Dedup logic
+✓ ENV-only secret structure
+✓ Failure silence window
+
+Outstanding:
+- Transaction-cost engine implementation
+- News opportunity scoring
+- Autonomous development agent loop
+- Structured regression testing harness
+
+------------------------------------------------------------
+SECTION 11 — REGRESSION CHECKLIST
+------------------------------------------------------------
+
+[ ] IBKR connects
+[ ] score_total computed
+[ ] risk_score computed
+[ ] BUY threshold validated
+[ ] DB insert verified
+[ ] Trigger A detection
+[ ] Trigger C AI invocation
+[ ] Dedup functioning
+[ ] Failure silence window
+[ ] No hardcoded secrets
+
+------------------------------------------------------------
+SECTION 12 — FUTURE ROADMAP
+------------------------------------------------------------
+
+PHASE NEXT:
+- Implement churn control engine
+- Integrate news into scoring
+- Build autonomous dev loop (Codex CLI or Agents SDK)
+- Add volatility regime scaling
+- Add drawdown guardrail
+- Implement structured performance reporting
+
+END OF MASTER WHITEPAPER

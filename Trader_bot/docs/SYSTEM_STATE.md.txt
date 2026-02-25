@@ -1,0 +1,87 @@
+# Penny System — Current State (Human)
+
+## Paths
+- Root: C:\Users\kieyf\penny-system
+- Bot: C:\Users\kieyf\penny-system\Trader_bot
+- Venv: C:\Users\kieyf\penny-system\venv
+- DB (active): Trader_bot\output\trader.sqlite
+
+## IBKR
+- TWS Paper enabled
+- Host: 127.0.0.1
+- Port: 7497
+- clientId: 12
+
+## Core Commands
+- Activate: venv\Scripts\activate
+- Run scan: cd Trader_bot && python main_daily_run.py
+- Fill qty: python fill_suggested_qty.py --only-buy --overwrite
+- Approve: python approve.py
+- Notify (morning): python notify_scan.py --mode morning
+- Notify (hourly): python notify_scan.py --mode hourly
+
+## What Works
+- main_daily_run.py creates runs + recs + brief
+- approve.py reads BUY list and can place brackets
+- suggested_qty column exists and can be populated
+
+## Current Objectives
+- Set TELEGRAM_CHAT_ID to numeric (not None) for scheduled notifications
+- Add Marketaux + SEC/PR feeds + OpenAI QC (Triggers A & C)
+- Automate morning + hourly via Task Scheduler
+
+## Notes
+- Task Scheduler can require password; use “run only when user is logged on” if you only have a PIN
+
+======================================================================
+
+# SYSTEM_STATE (as of 2026-02-21)
+
+## Project root
+- C:\Users\kieyf\penny-system
+- Bot code: Trader_bot\
+
+## Database
+- Active DB: Trader_bot\output\trader.sqlite (NOT Trader_bot\db\trader.sqlite)
+
+## Environment / keys (.env)
+- TELEGRAM_BOT_TOKEN = set
+- TELEGRAM_CHAT_ID = 8336838980 (confirmed working)
+- MARKETAUX_API_KEY = set (validated via HTTP 200)
+- OPENAI_API_KEY = set
+
+## Telegram status
+- Telegram messaging works from scheduled/non-interactive scripts using TELEGRAM_CHAT_ID.
+- IBKR failure path now sends a CLEAN Telegram warning message (no long traceback).
+
+## Marketaux status
+- Marketaux wired into src_news.py
+- fetch_and_analyze_news(symbol) returns headlines; keyword hits generate risk_hits / positive_hits.
+- Tested:
+  - TSLA -> headlines returned
+  - AMC -> headlines returned; risk_hits returned at least one item
+
+## IBKR / TWS status
+- TWS is used (not Gateway).
+- When API enabled and port open:
+  - Test-NetConnection 127.0.0.1 -Port 7497 => True
+- If API disabled/port closed:
+  - notify_scan sends Telegram warning and exits cleanly.
+
+## Code changes that are already in place
+- Trader_bot\config.py:
+  - loads .env via dotenv (load_dotenv)
+  - exposes TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OPENAI_API_KEY, MARKETAUX_API_KEY
+- Trader_bot\notify_scan.py:
+  - fixed subprocess paths to use Trader_bot\main_daily_run.py and Trader_bot\fill_suggested_qty.py
+  - Marketaux Trigger A lines added in the actionable BUY message loop
+  - pipeline failure no longer hard-crashes; sends concise Telegram warning then returns
+- Trader_bot\src_news.py:
+  - supports both execution styles via try/except import for config
+  - includes fetch_and_analyze_news() using Marketaux + keyword lists
+
+## Current objective (next work)
+- Wire OpenAI QC triggers (A & C) into workflow:
+  - A: market/news risk trigger
+  - C: conflict trigger (base says BUY/low risk but news flags suggest caution)
+- Validate morning/hourly automation behavior after QC wiring.

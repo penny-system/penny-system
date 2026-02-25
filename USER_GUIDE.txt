@@ -1,0 +1,307 @@
+================================================================================
+  PENNY SYSTEM -- USER GUIDE
+================================================================================
+
+
+WHAT YOU'LL RECEIVE EACH DAY
+--------------------------------------------------------------------------------
+
+1. MORNING BRIEF (8:00 AM)
+   An MP3 audio summary is sent first, covering your open positions, today's
+   buy candidates, and watchlist highlights. This is followed by a text brief
+   and, if there are actionable candidates, a formatted BUY message.
+
+2. HOURLY SCAN
+   Runs throughout the day. A notification is only sent if new actionable BUY
+   candidates appear that haven't already been actioned.
+
+
+READING A BUY CANDIDATE MESSAGE
+--------------------------------------------------------------------------------
+
+   Example message:
+
+   🎆 2 BUY Candidates -- Sat, Feb 22
+   💰 Purse: $5,000  |  Max: 6 positions
+
+   ━━━━━━━━━━━━━━
+   📈 GRCE  ⚠️
+   Score 84.5  ·  Conf 72%  ·  Risk 0.30
+   Ref $0.42  ·  Stop $0.37  ·  Take $0.55
+   Qty: 500 shares
+   🛡 Gate: HOLD (78%) -- Near-term dilution risk
+   Why: Momentum breakout on volume confirmation
+
+   ━━━━━━━━━━━━━━
+   📈 BRLS
+   Score 82.1  ·  Conf 68%  ·  Risk 0.20
+   Ref $1.15  ·  Stop $1.00  ·  Take $1.45
+   Qty: 250 shares
+
+   ━━━━━━━━━━━━━━
+   python approve.py
+
+
+   Field Descriptions:
+
+   Score    Composite signal score. 80 or above = BUY threshold.
+
+   Conf     Scoring engine's confidence in the BUY signal.
+            Higher = stronger setup.
+
+   Risk     Risk score. Lower is better. Penalises volatility,
+            dilution signals, news risk, etc.
+
+   Ref      Reference entry price at time of scan.
+
+   Stop     Stop-loss price. Order exits here if the trade goes
+            against you.
+
+   Take     Take-profit price. Target exit.
+
+   Qty      Suggested share quantity based on your purse and
+            position sizing rules.
+
+   ⚠️       News risk detected for this ticker (see Trigger A below).
+
+   Why      First sentence of the scoring engine's rationale.
+            See "Scoring Signal Glossary" below for plain-English definitions.
+
+
+SCORING SIGNAL GLOSSARY
+--------------------------------------------------------------------------------
+
+   These terms appear in the "Why" line of each candidate. They describe the
+   signals the scanner used to identify the stock.
+
+   Short-term move (+X%)
+      The stock's price went up X% in the last few minutes of trading.
+      The bigger the number, the stronger the intraday momentum.
+
+   5-day move (+X%)
+      The stock has been climbing steadily over the past week. A positive
+      number means the trend has been upward for several days, not just today.
+
+   Volume surge (Xx normal)
+      More than twice the usual number of shares have traded hands today.
+      Think of it as a crowd forming -- when a lot of people suddenly want
+      to buy, it tends to push the price higher and makes the move more
+      credible. The scanner requires at least 1.2x average volume before
+      treating a setup as confirmed.
+
+   Above-average volume (Xx)
+      Trading activity is higher than usual, but not dramatically so.
+      A mild positive signal.
+
+   Price breakout confirmed
+      The stock pushed through a price level it had been stuck below, and
+      the volume backed it up. This is the strongest setup the scanner looks
+      for -- both the price move and the crowd activity line up. A score of
+      80+ (BUY) requires this condition to be met.
+
+   Price breakout unconfirmed
+      The stock pushed through a resistance level, but not many people were
+      trading it. Without volume behind it, the move may not hold. The
+      scanner deliberately caps the score here and will not trigger a BUY
+      on this signal alone.
+
+   High liquidity / Strong liquidity
+      A lot of money is flowing through this stock today. Higher liquidity
+      means you can buy and sell without the price jumping around on you.
+
+   $XM daily volume
+      The total dollar value of shares traded today (e.g. "$4M daily volume"
+      means $4 million worth of shares changed hands). A useful proxy for
+      how easy it will be to get in and out of the position cleanly.
+
+   Scan criteria met
+      No single signal stood out, but the stock passed the minimum filters
+      across the board.
+
+
+SOFT GATE DECISIONS (🛡 Gate)
+--------------------------------------------------------------------------------
+
+   When a BUY candidate also has active news risk (Trigger A), Claude reviews
+   it and returns one of four decisions:
+
+   APPROVE  Risk flagged but assessed as acceptable -- proceed.
+            /approve SYMBOL will place the order normally.
+
+   HOLD     Pause -- the news situation needs to clarify before acting.
+            Review the reason carefully before using /approve.
+
+   REDUCE   Proceed but with a smaller position.
+            Consider using /approve SYMBOL with a lower qty override.
+
+   BLOCK    Hard veto -- do not place this order.
+            Treat this as a strong signal to skip the candidate.
+
+   The percentage shown (e.g. 78%) is Claude's self-assessed certainty in its
+   own decision. Think of it as signal strength, not a trade probability.
+
+
+TRIGGER A ALERTS (🔴)
+--------------------------------------------------------------------------------
+
+   Trigger A fires when a single news headline contains 2 or more risk keywords
+   simultaneously (e.g. "offering" + "warrant" in the same sentence). This is a
+   stronger signal than a single keyword hit and always triggers a Soft Gate
+   review if the ticker is also a BUY candidate.
+
+   Risk keywords include: offering, warrant, dilution, reverse split, bankruptcy,
+   going concern, halt, investigation, lawsuit, and others.
+
+
+TELEGRAM COMMANDS
+--------------------------------------------------------------------------------
+
+   All commands are sent directly in your Telegram chat with the bot.
+   No computer access required -- only TWS on your PC must be running
+   when placing orders or checking positions.
+
+   --- VIEWING ---
+
+   /status
+      Show a summary of the latest scan: run number, time, how many
+      BUY candidates and watchlist entries were found.
+
+   /candidates
+      Re-display the current BUY candidates from the latest scan,
+      including score, prices, and suggested qty for each.
+
+   /positions
+      Fetch your live open positions from IBKR and display symbol,
+      share count, and average cost.
+      Requires: TWS running with API enabled.
+
+   /brief
+      Re-send today's morning brief text in case you missed it.
+
+   --- PLACING ORDERS ---
+
+   /approve SYMBOL
+      Stage a bracket order for the named symbol using the suggested
+      qty from the scan.
+      Example: /approve GRCE
+
+   /approve SYMBOL QTY
+      Stage a bracket order with a custom share quantity.
+      Example: /approve GRCE 300
+
+   /confirm
+      Place the staged bracket order via IBKR. You will be shown a
+      full summary of the order (entry, stop, take, qty) before
+      this command is sent -- review carefully.
+      Requires: TWS running with API enabled.
+
+   /cancel
+      Discard the pending order without placing it. Safe to use at
+      any point before /confirm.
+
+   /skip SYMBOL
+      Dismiss a candidate for the current run. No order is placed
+      and no further alerts will be sent for this ticker today.
+      Example: /skip BRLS
+
+   --- SETTINGS ---
+
+   /showsettings
+      Display current runtime values for purse, position limits, and
+      FX rate.
+
+   /purse AMOUNT
+      Propose a new total capital allocation (in CAD).
+      Example: /purse 5000
+
+   /maxpos N
+      Propose a new maximum number of concurrent positions.
+      Example: /maxpos 6
+
+   /fx RATE
+      Propose a new USD/CAD exchange rate.
+      Example: /fx 0.74
+
+   /minpos AMOUNT
+      Propose a new minimum position size in USD.
+      Example: /minpos 150
+
+   /confirm
+      Also used to apply a proposed settings change (same command,
+      works for both orders and settings -- the bot handles both).
+
+   /cancel
+      Also used to discard a proposed settings change.
+
+   /resetsettings
+      Remove all runtime overrides and return to the defaults
+      defined in config.py.
+
+
+TYPICAL DAILY WORKFLOW
+--------------------------------------------------------------------------------
+
+   1. Receive the morning audio brief (MP3) at 8:00 AM.
+   2. Read the BUY candidate message that follows.
+   3. For each candidate you want to act on:
+        a. Type /approve GRCE  (or with a custom qty: /approve GRCE 300)
+        b. Review the order summary the bot sends back.
+        c. Type /confirm to place the bracket order.
+           OR type /cancel to discard.
+   4. For candidates you want to ignore: /skip GRCE
+   5. At any time:
+        /status    -- check latest scan
+        /positions -- see what you currently hold
+        /brief     -- re-read the morning summary
+
+
+BRACKET ORDER STRUCTURE
+--------------------------------------------------------------------------------
+
+   Every order placed via /approve + /confirm is a bracket order:
+
+   Parent:  BUY Limit at Ref price
+   Child 1: SELL Limit at Take price  (take-profit)
+   Child 2: SELL Stop  at Stop price  (stop-loss)
+
+   All three legs are linked. If the take-profit fills, the stop-loss
+   is automatically cancelled, and vice versa.
+
+   No orders are placed automatically. Every trade requires your
+   explicit /confirm.
+
+
+PIPELINE FAILURE ALERTS
+--------------------------------------------------------------------------------
+
+   If the IBKR connection or pipeline fails, you will receive:
+
+      ⚠️ IBKR/pipeline failed: ConnectionRefusedError
+      (Check TWS running + API enabled on port 7497)
+
+   Common causes:
+   - TWS / IB Gateway is not running.
+   - API is not enabled in TWS settings:
+     Edit > Global Configuration > API > Settings
+   - Port mismatch: paper trading uses 7497, live trading uses 7496.
+
+   After fixing the issue, the next scheduled run will retry automatically.
+   Repeated failures within a 24-hour window are silenced to avoid spam.
+
+
+KEY SETTINGS (config.py / .env)
+--------------------------------------------------------------------------------
+
+   PURSE                  Total capital allocated for this strategy.
+   MAX_POSITIONS          Maximum concurrent open positions.
+   MIN_SCORE              Minimum score to trigger a BUY notification (default: 80).
+   IB_PORT                TWS API port (7497 = paper, 7496 = live).
+   MARKETAUX_API_KEY      News API key for headline analysis.
+   ANTHROPIC_API_KEY      Claude API key for Soft Gate reviews.
+   TELEGRAM_BOT_TOKEN     Telegram bot credentials.
+   TELEGRAM_CHAT_ID       Your Telegram numeric chat ID.
+
+
+================================================================================
+  END OF USER GUIDE
+================================================================================

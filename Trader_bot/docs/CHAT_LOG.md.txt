@@ -1,0 +1,36 @@
+# Progress / Nuances Log (Short)
+
+## Milestones
+- System runs scans, writes to SQLite, generates brief.
+- suggested_qty column exists; approve reads it.
+- Introduced morning/hourly automation concept.
+- Agreed OpenAI QC layer + Marketaux + SEC/PR feeds.
+
+## Nuances encountered
+- Two sqlite files existed (db\trader.sqlite and output\trader.sqlite); output DB was active.
+- Windows CMD line got polluted when two commands were pasted together; run commands one at a time.
+- Telegram chat ID auto-detect works for telegram_bot.py, but scheduled notify scripts require a saved numeric chat id.
+
+
+======================================================================================
+
+# CHAT_LOG SUMMARY (as of 2026-02-21)
+
+Completed:
+- Confirmed TELEGRAM_CHAT_ID = 8336838980
+- Installed missing packages:
+  - python-telegram-bot
+  - requests, python-dotenv
+  - ib-insync
+- Marketaux API key validated (HTTP 200)
+- Added dotenv loading + key exposure in Trader_bot\config.py
+- Added Marketaux fetching + keyword analysis in Trader_bot\src_news.py
+- Wired basic Trigger A “news risk” line into notify_scan actionable BUY message
+- Fixed notify_scan subprocess paths to Trader_bot\main_daily_run.py and Trader_bot\fill_suggested_qty.py
+- Implemented clean Telegram warning if IBKR/pipeline fails (no crash)
+- Confirmed TWS API port open:
+  - Test-NetConnection 127.0.0.1 -Port 7497 => True
+
+Next:
+- Wire OpenAI QC triggers A & C
+- Validate morning/hourly automation behavior after QC wiring

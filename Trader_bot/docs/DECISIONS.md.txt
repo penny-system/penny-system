@@ -1,0 +1,45 @@
+# Architecture Decisions (Do Not Re-open Unless Needed)
+
+## News + AI design
+- Deterministic engine drives decisions.
+- OpenAI is decision-support/QC only (not primary driver).
+- Morning run: OpenAI always runs on top BUYs.
+- Intraday: OpenAI standby triggers only for:
+  - Trigger A: High-severity event detected
+  - Trigger C: Conflict (base risk low but red flags present)
+
+## News sources
+- Use Marketaux (paid) for ticker news.
+- Add SEC EDGAR + Press Release RSS for high-signal events.
+- Keep IBKR historical headlines keyword scan as fallback if desired.
+
+## Outputs
+- OpenAI results stored to DB fields (news_action/multiplier/score/flags).
+- No need to append narrative news summaries to brief.txt.
+
+====================================================
+
+# DECISIONS (as of 2026-02-21)
+
+## Execution philosophy
+- Deterministic engine decides trades.
+- OpenAI is QC / risk overlay only (never “decides” trades directly).
+
+## Triggers for OpenAI usage
+- Trigger A: News risk detected (keyword hit / risk score threshold).
+- Trigger C: Conflict detected (base engine indicates BUY/low risk but news flags caution).
+
+## Scheduling behavior
+- Hourly scan:
+  - Runs pipeline when IBKR is available.
+  - If IBKR unavailable, sends concise Telegram warning and exits cleanly (no crash).
+- Morning scan:
+  - (Next phase) will include QC pass for top candidates.
+
+## Telegram
+- Use TELEGRAM_CHAT_ID from .env (required for Task Scheduler scripts).
+- Chat ID confirmed: 8336838980
+
+## Marketaux
+- Marketaux is the news ingestion source.
+- Keyword lists in src_news.py flag risk/positive headlines.

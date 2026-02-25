@@ -1,0 +1,23 @@
+# Secrets
+.env
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime output (DB, state, logs)
+output/
+dev_report.txt
+
+# Old/wrong DB location
+Trader_bot/db/
+
+# Generated audio
+data/
+
+# Scratch files
+"New Text Document*.txt"

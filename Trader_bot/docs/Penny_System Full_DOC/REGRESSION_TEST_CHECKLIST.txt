@@ -1,0 +1,36 @@
+PENNY SYSTEM – REGRESSION TEST CHECKLIST
+=========================================
+
+Core Engine Tests:
+[ ] IBKR connects successfully
+[ ] Bars retrieved for test symbol
+[ ] Features computed without None errors
+[ ] score_total generated
+[ ] risk_score generated
+[ ] BUY decision threshold working
+
+Database Tests:
+[ ] run_id increments
+[ ] recommendations inserted
+[ ] suggested_qty populated
+
+Notification Tests:
+[ ] Hourly mode sends actionable alert
+[ ] Morning mode sends brief
+[ ] Trigger A detects 2+ risk keywords
+[ ] Trigger C invokes OpenAI
+[ ] Dedup prevents repeat spam
+[ ] 24h failure silence works
+
+Security Tests:
+[ ] No API keys in repo files
+[ ] ENV variables required
+
+Cost Logic (Future):
+[ ] Churn penalty applied
+[ ] Replacement threshold respected
+
+Autonomous Agent (Future):
+[ ] Agent executes test loop
+[ ] Agent validates Telegram
+[ ] Agent repairs indentation errors
