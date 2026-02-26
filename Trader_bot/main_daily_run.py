@@ -13,6 +13,7 @@ import src_universe
 import src_features
 import src_scoring
 import src_sizing
+import src_risk
 
 
 # ----------------------------
@@ -185,7 +186,7 @@ def score_all_candidates(feats_by_symbol):
                     "decision": "BUY" if score_total >= 80 else "WATCH",
                     "score_total": score_total,
                     "confidence": confidence,
-                    "risk_score": float(feat.get("risk_score", 25.0)),
+                    "risk_score": src_risk.risk_score_and_flags(sym, feat)[0],
                     "ref_price": ref,
                     "stop_price": round(ref * (1.0 - float(config.STOP_LOSS_PCT)), 2) if ref else 0.0,
                     "take_price": round(ref * (1.0 + float(config.TAKE_PROFIT_PCT)), 2) if ref else 0.0,
