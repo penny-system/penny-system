@@ -1,16 +1,19 @@
 # telegram_bot.py
 import asyncio
 import concurrent.futures
+import json
 import math
 import os
 import sqlite3
 import sys
 import threading
+from datetime import datetime
 
 _BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _BOT_DIR)
 _DB_PATH = os.path.join(_BOT_DIR, "output", "trader.sqlite")
 _BRIEF_PATH = os.path.join(_BOT_DIR, "output", "brief.txt")
+_APPROVED_TRADES_PATH = os.path.join(_BOT_DIR, "output", "approved_trades.json")
 
 import config
 from approve import place_bracket, load_buy_recs, latest_run_id as _latest_run_id
@@ -31,6 +34,32 @@ from src_settings import (
 
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+
+
+def _record_approved_trade(symbol: str) -> None:
+    """Persist a successfully placed order to approved_trades.json."""
+    try:
+        os.makedirs(os.path.dirname(_APPROVED_TRADES_PATH), exist_ok=True)
+        try:
+            with open(_APPROVED_TRADES_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            data = {}
+        data[symbol.upper()] = datetime.now().isoformat()
+        with open(_APPROVED_TRADES_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def _get_approved_symbols() -> set:
+    """Return set of symbols that had orders placed via /confirm."""
+    try:
+        with open(_APPROVED_TRADES_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {sym.upper() for sym in data}
+    except Exception:
+        return set()
 
 
 # In-memory pending trade (cleared after confirm/cancel)
@@ -367,6 +396,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             result = await asyncio.wrap_future(_fut)
             _pending_trade.clear()
+            _record_approved_trade(symbol)
             await update.message.reply_text(
                 f"✅ Bracket order placed for <b>{symbol}</b>\n"
                 f"Entry: <b>${entry:.2f}</b>  ·  Qty: <b>{qty}</b> shares\n"
@@ -574,11 +604,12 @@ async def positions_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         pos_list = await asyncio.wait_for(asyncio.wrap_future(_pos_fut), timeout=15)
-        if not pos_list:
+        active = [p for p in pos_list if int(p.position) != 0]
+        if not active:
             await update.message.reply_text("No open positions.")
             return
         lines = ["📊 <b>Open Positions</b>"]
-        for p in pos_list:
+        for p in active:
             sym = p.contract.symbol
             qty = int(p.position)
             avg = float(p.avgCost)
@@ -697,8 +728,18 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    ibkr_symbols = {item["symbol"] for item in items}
+    missing_approved = _get_approved_symbols() - ibkr_symbols
+    warning_lines = [
+        f"⚠️ <b>{sym}</b> — approved but not found in IBKR positions (may have been filled and closed)"
+        for sym in sorted(missing_approved)
+    ]
+
     if not items:
-        await update.message.reply_text("No open positions.")
+        if warning_lines:
+            await update.message.reply_text("\n".join(warning_lines), parse_mode="HTML")
+        else:
+            await update.message.reply_text("No open positions.")
         return
 
     apply_overrides_to_config(config)
@@ -782,7 +823,8 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     body = f"\n{DIVIDER}\n".join(position_blocks)
-    await update.message.reply_text(body + summary, parse_mode="HTML")
+    warnings = ("\n\n" + "\n".join(warning_lines)) if warning_lines else ""
+    await update.message.reply_text(body + summary + warnings, parse_mode="HTML")
 
 
 def main():
