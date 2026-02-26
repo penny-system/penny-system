@@ -10,7 +10,8 @@ def risk_score_and_flags(
 ) -> tuple:
     """
     Weighted risk model. Each sub-factor is scored 0-100, multiplied by its
-    weight, and summed. Weights total 100% so output is naturally 0-100.
+    weight, and summed. Weights total 100%. Final score is normalized to 0–1
+    (floor 0.10, hard clamp 1.0).
 
     Pillars:
       Market data (65%):
@@ -123,6 +124,11 @@ def risk_score_and_flags(
         0.08 * twits_score
     )
 
-    risk = max(risk, 10.0)
+    # Normalize to 0–1 (sub-scores were 0–100, weights sum to 1.0)
+    risk = risk / 100.0
+
+    # Floor at 0.10, hard clamp at 1.0
+    risk = max(risk, 0.10)
+    risk = min(risk, 1.0)
 
     return float(risk), ("none" if not flags else ",".join(flags))
