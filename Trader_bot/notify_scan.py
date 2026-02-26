@@ -212,7 +212,7 @@ def get_buy_recs(con: sqlite3.Connection, run_id: int):
 def get_watch_recs(con: sqlite3.Connection, run_id: int):
     cur = con.cursor()
     cur.execute("""
-        SELECT symbol, score_total, confidence, ref_price
+        SELECT symbol, score_total, confidence, ref_price, risk_score, rationale
         FROM recommendations
         WHERE run_id = ?
           AND UPPER(TRIM(decision)) = 'WATCH'
@@ -401,9 +401,9 @@ def main():
                     "symbol":      str(r[0]).upper(),
                     "score_total": float(r[1] or 0),
                     "confidence":  float(r[2] or 0),
-                    "risk_score":  0,
                     "ref_price":   float(r[3] or 0),
-                    "rationale":   "",
+                    "risk_score":  float(r[4] or 0) if len(r) > 4 else 0,
+                    "rationale":   str(r[5] or "") if len(r) > 5 else "",
                 }))
 
         lines.extend(_format_trigger_a_block(trigger_a_new))
@@ -416,7 +416,7 @@ def main():
         send_telegram("\n".join(lines), parse_mode="HTML")
         save_state(state)
         con.close()
-        print("✅ Morning brief sent.")
+        print("[OK] Morning brief sent.")
         return
 
     # --- MODE: hourly (notify only if actionable + avoid spamming same run/signature) ---
@@ -534,7 +534,7 @@ def main():
     save_state(state)
     con.close()
 
-    print("✅ Hourly actionable notification sent.")
+    print("[OK] Hourly actionable notification sent.")
 
 
 
