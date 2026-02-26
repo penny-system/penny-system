@@ -688,7 +688,8 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
 
-                # Best-effort: prev close for daily % change
+                # Best-effort: prev close for daily change; last bar close as curr fallback
+                prev_close = 0.0
                 try:
                     bars = ib.reqHistoricalData(
                         contract, endDateTime="",
@@ -696,17 +697,26 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         whatToShow="TRADES", useRTH=True, formatDate=1,
                     )
                     if len(bars) >= 2:
-                        prev_closes[contract.symbol.upper()] = float(bars[-2].close)
+                        prev_close = float(bars[-2].close)
+                        prev_closes[contract.symbol.upper()] = prev_close
+                    # Fall back to last bar close if live market data unavailable
+                    if curr_price <= 0 and len(bars) >= 1:
+                        curr_price = float(bars[-1].close)
                 except Exception:
                     pass
 
-                pnl_usd = (curr_price - avg_cost) * qty if curr_price > 0 else 0.0
+                pnl_usd      = (curr_price - avg_cost) * qty if curr_price > 0 else 0.0
+                day_chng_usd = (curr_price - prev_close) * qty if (curr_price > 0 and prev_close > 0) else None
+                day_chng_pct = ((curr_price - prev_close) / prev_close * 100) if (curr_price > 0 and prev_close > 0) else None
+
                 items.append({
-                    "symbol":       contract.symbol.upper(),
-                    "qty":          qty,
-                    "avgCost":      avg_cost,
-                    "marketPrice":  curr_price,
+                    "symbol":        contract.symbol.upper(),
+                    "qty":           qty,
+                    "avgCost":       avg_cost,
+                    "marketPrice":   curr_price,
                     "unrealizedPNL": pnl_usd,
+                    "dayChngUsd":    day_chng_usd,
+                    "dayChngPct":    day_chng_pct,
                 })
 
             ib.disconnect()
@@ -755,17 +765,19 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     position_blocks: list[str] = []
     total_cost_usd = 0.0
     total_pnl_usd  = 0.0
-    best_sym,  best_pct  = "", -9999.0
-    worst_sym, worst_pct = "", 9999.0
+    best_sym,  best_day_usd,  best_day_pct  = "", 0.0, -9999.0
+    worst_sym, worst_day_usd, worst_day_pct = "", 0.0,  9999.0
     green = red = 0
 
     for item in items:
-        sym     = item["symbol"]
-        qty     = item["qty"]
-        entry   = item["avgCost"]
-        curr    = item["marketPrice"]
-        pnl_usd = item["unrealizedPNL"]
-        cost_basis = entry * qty
+        sym          = item["symbol"]
+        qty          = item["qty"]
+        entry        = item["avgCost"]
+        curr         = item["marketPrice"]
+        pnl_usd      = item["unrealizedPNL"]
+        day_chng_usd = item["dayChngUsd"]
+        day_chng_pct = item["dayChngPct"]
+        cost_basis   = entry * qty
 
         total_cost_usd += cost_basis
         total_pnl_usd  += pnl_usd
@@ -774,21 +786,23 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pnl_sign = "+" if pnl_usd >= 0 else ""
         pnl_flag = "🟢" if pnl_usd >= 0 else "🔴"
 
-        if pnl_pct > best_pct:
-            best_pct,  best_sym  = pnl_pct, sym
-        if pnl_pct < worst_pct:
-            worst_pct, worst_sym = pnl_pct, sym
+        # Best/worst by today's CHNG (not P&L from entry)
+        if day_chng_pct is not None:
+            if day_chng_pct > best_day_pct:
+                best_day_pct, best_day_usd, best_sym  = day_chng_pct, day_chng_usd, sym
+            if day_chng_pct < worst_day_pct:
+                worst_day_pct, worst_day_usd, worst_sym = day_chng_pct, day_chng_usd, sym
+
         if pnl_usd >= 0:
             green += 1
         else:
             red += 1
 
-        # Daily change — best effort, N/A if market closed or data unavailable
-        prev = prev_closes.get(sym)
-        if prev and prev > 0 and curr > 0:
-            day_pct = (curr - prev) / prev * 100
-            arrow   = "▲" if day_pct >= 0 else "▼"
-            day_str = f"{arrow} Today: {day_pct:+.1f}%"
+        # Daily change — show both $ and %
+        if day_chng_usd is not None and day_chng_pct is not None:
+            d_sign = "+" if day_chng_usd >= 0 else ""
+            arrow  = "▲" if day_chng_pct >= 0 else "▼"
+            day_str = f"{arrow} Today: {d_sign}${abs(day_chng_usd):.2f} ({d_sign}{day_chng_pct:.2f}%)"
         else:
             day_str = "Today: N/A"
 
@@ -798,7 +812,7 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         position_blocks.append(
             f"🔹 <b>{sym}</b> | {qty} shares\n"
             f"Entry: {entry_str}  ·  Current: {curr_str}  ·  "
-            f"{pnl_flag} {pnl_sign}${abs(pnl_usd):,.0f} ({pnl_sign}{pnl_pct:.1f}%)\n"
+            f"{pnl_flag} {pnl_sign}${abs(pnl_usd):.2f} ({pnl_sign}{pnl_pct:.2f}%)\n"
             f"{day_str}"
         )
 
@@ -812,13 +826,25 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     net_sign = "+" if total_pnl >= 0 else ""
     net_flag = "🟢" if total_pnl >= 0 else "🔴"
 
+    # Best/worst summary strings (based on today's CHNG)
+    if best_sym:
+        b_sign = "+" if best_day_usd >= 0 else ""
+        best_str = f"<b>{best_sym}</b> {b_sign}${abs(best_day_usd):.2f} ({b_sign}{best_day_pct:.2f}%)"
+    else:
+        best_str = "N/A"
+    if worst_sym:
+        w_sign = "+" if worst_day_usd >= 0 else ""
+        worst_str = f"<b>{worst_sym}</b> {w_sign}${abs(worst_day_usd):.2f} ({w_sign}{worst_day_pct:.2f}%)"
+    else:
+        worst_str = "N/A"
+
     summary = (
         f"\n📊 <b>PORTFOLIO SUMMARY</b>\n"
         f"{DIVIDER}\n"
-        f"Total: {len(items)}/{max_pos} positions  ·  ${total_invested:,.0f} invested\n"
-        f"Net Gain: {net_sign}${abs(total_pnl):,.0f} ({net_sign}{overall_pct:.1f}%) {net_flag}\n"
-        f"Best:  <b>{best_sym}</b> {'+' if best_pct >= 0 else ''}{best_pct:.1f}%\n"
-        f"Worst: <b>{worst_sym}</b> {'+' if worst_pct >= 0 else ''}{worst_pct:.1f}%\n"
+        f"Total: {len(items)}/{max_pos} positions  ·  ${total_invested:,.2f} invested\n"
+        f"Net Gain: {net_sign}${abs(total_pnl):.2f} ({net_sign}{overall_pct:.2f}%) {net_flag}\n"
+        f"Best today:  {best_str}\n"
+        f"Worst today: {worst_str}\n"
         f"In Green: {green}/{len(items)}  ·  In Red: {red}/{len(items)}"
     )
 
