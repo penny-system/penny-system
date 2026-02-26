@@ -75,7 +75,7 @@ def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False, e
     sym   = str(r.get("symbol", "")).upper()
     score = float(r.get("score_total", 0) or 0)
     conf  = float(r.get("confidence",  0) or 0)
-    risk  = float(r.get("risk_score",  0) or 0) / 100
+    risk  = float(r.get("risk_score",  0) or 0)
     refp  = float(r.get("ref_price",   0) or 0)
     stop  = float(r.get("stop_price",  0) or 0)
     take  = float(r.get("take_price",  0) or 0)
@@ -122,7 +122,7 @@ def fmt_watch_candidate(r: dict) -> str:
     sym   = str(r.get("symbol", "")).upper()
     score = float(r.get("score_total", 0) or 0)
     conf  = float(r.get("confidence",  0) or 0)
-    risk  = float(r.get("risk_score",  0) or 0) / 100
+    risk  = float(r.get("risk_score",  0) or 0)
     refp  = float(r.get("ref_price",   0) or 0)
     raw_rationale = (r.get("rationale") or "").strip()
 
