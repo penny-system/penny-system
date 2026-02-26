@@ -123,4 +123,6 @@ def risk_score_and_flags(
         0.08 * twits_score
     )
 
+    risk = max(risk, 10.0)
+
     return float(risk), ("none" if not flags else ",".join(flags))
