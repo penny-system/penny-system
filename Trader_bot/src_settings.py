@@ -3,9 +3,10 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-OVERRIDES_PATH = "runtime_overrides.json"
-PENDING_PATH = "pending_overrides.json"
-ALLOWED_CHAT_PATH = "telegram_allowed_chat.json"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+OVERRIDES_PATH = os.path.join(_HERE, "runtime_overrides.json")
+PENDING_PATH = os.path.join(_HERE, "pending_overrides.json")
+ALLOWED_CHAT_PATH = os.path.join(_HERE, "telegram_allowed_chat.json")
 
 ALLOWED_KEYS = {
     "TRADE_PURSE_CAD": float,
