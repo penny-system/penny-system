@@ -143,7 +143,7 @@ def run_pipeline():
     # 1) scan — run from _BOT_DIR so scan_*.csv and output/ resolve correctly
     r1 = subprocess.run(
         [sys.executable, os.path.join(_BOT_DIR, "main_daily_run.py")],
-        capture_output=True, text=True, cwd=_BOT_DIR,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=_BOT_DIR,
     )
     if r1.returncode != 0:
         err = (r1.stderr or "").strip()
@@ -168,7 +168,7 @@ def run_pipeline():
     # 2) fill qty
     r2 = subprocess.run(
         [sys.executable, os.path.join(_BOT_DIR, "fill_suggested_qty.py"), "--only-buy", "--overwrite"],
-        capture_output=True, text=True, cwd=_BOT_DIR,
+        capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=_BOT_DIR,
     )
     if r2.returncode != 0:
         print(r2.stdout)
