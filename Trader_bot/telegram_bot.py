@@ -36,30 +36,101 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
 
-def _record_approved_trade(symbol: str) -> None:
-    """Persist a successfully placed order to approved_trades.json."""
+_MISSING_GRACE_MINUTES = 30
+
+
+def _load_approved_data() -> dict:
+    """Load approved_trades.json, normalising old string-value format to new dict format."""
+    try:
+        with open(_APPROVED_TRADES_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        data = {}
+        for sym, val in raw.items():
+            if isinstance(val, str):
+                # old format: {"SYM": "iso_timestamp"}
+                data[sym.upper()] = {"approved_at": val, "first_missing_at": None}
+            elif isinstance(val, dict):
+                data[sym.upper()] = val
+        return data
+    except Exception:
+        return {}
+
+
+def _save_approved_data(data: dict) -> None:
     try:
         os.makedirs(os.path.dirname(_APPROVED_TRADES_PATH), exist_ok=True)
-        try:
-            with open(_APPROVED_TRADES_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-        data[symbol.upper()] = datetime.now().isoformat()
         with open(_APPROVED_TRADES_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
     except Exception:
         pass
 
 
-def _get_approved_symbols() -> set:
-    """Return set of symbols that had orders placed via /confirm."""
-    try:
-        with open(_APPROVED_TRADES_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return {sym.upper() for sym in data}
-    except Exception:
-        return set()
+def _record_approved_trade(symbol: str) -> None:
+    """Persist a successfully placed order to approved_trades.json."""
+    data = _load_approved_data()
+    data[symbol.upper()] = {"approved_at": datetime.now().isoformat(), "first_missing_at": None}
+    _save_approved_data(data)
+
+
+def _process_missing_approved(ibkr_symbols: set) -> list:
+    """
+    Cross-reference approved_trades.json against current IBKR positions.
+
+    - First time a symbol is missing: record first_missing_at timestamp.
+    - If missing for < GRACE_MINUTES: show warning with countdown.
+    - If missing for >= GRACE_MINUTES: auto-remove from file silently.
+    - If symbol is present in IBKR: clear first_missing_at.
+
+    Returns list of warning line strings.
+    """
+    data = _load_approved_data()
+    if not data:
+        return []
+
+    now = datetime.now()
+    warning_lines = []
+    to_remove = []
+    changed = False
+
+    for sym, entry in data.items():
+        if sym in ibkr_symbols:
+            # Position found in IBKR — clear any stale missing timestamp
+            if entry.get("first_missing_at"):
+                entry["first_missing_at"] = None
+                changed = True
+            continue
+
+        # Symbol is missing from IBKR
+        first_missing = entry.get("first_missing_at")
+
+        if first_missing is None:
+            # First time detected missing — start the grace timer
+            entry["first_missing_at"] = now.isoformat()
+            changed = True
+            elapsed_min = 0.0
+        else:
+            try:
+                elapsed_min = (now - datetime.fromisoformat(first_missing)).total_seconds() / 60
+            except Exception:
+                elapsed_min = 0.0
+
+        if elapsed_min >= _MISSING_GRACE_MINUTES:
+            to_remove.append(sym)
+            changed = True
+        else:
+            remaining = int(_MISSING_GRACE_MINUTES - elapsed_min)
+            warning_lines.append(
+                f"⚠️ <b>{sym}</b> — approved but not found in IBKR positions "
+                f"(may have been filled and closed · auto-clears in {remaining}m)"
+            )
+
+    for sym in to_remove:
+        del data[sym]
+
+    if changed:
+        _save_approved_data(data)
+
+    return warning_lines
 
 
 # In-memory pending trade (cleared after confirm/cancel)
@@ -664,6 +735,7 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             ib = IB()
             ib.connect(config.IB_HOST, config.IB_PORT, clientId=18)
+            ib.reqMarketDataType(3)  # delayed data — free, no extra subscription needed
             positions = ib.reqPositions()  # explicit fresh request; awaits positionEnd
             active = [p for p in positions if p.position > 0]
 
@@ -739,13 +811,10 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     ibkr_symbols = {item["symbol"] for item in items}
-    missing_approved = _get_approved_symbols() - ibkr_symbols
-    warning_lines = [
-        f"⚠️ <b>{sym}</b> — approved but not found in IBKR positions (may have been filled and closed)"
-        for sym in sorted(missing_approved)
-    ]
+    warning_lines = _process_missing_approved(ibkr_symbols)
 
     if not items:
+        warning_lines = _process_missing_approved(set())
         if warning_lines:
             await update.message.reply_text("\n".join(warning_lines), parse_mode="HTML")
         else:
