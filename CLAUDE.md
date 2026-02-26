@@ -135,3 +135,10 @@ OPENAI_MODEL=gpt-4o-mini      # optional override
 - Market data type: `1` (Live) — change to `3` (Delayed) if not subscribed
 - TWS must be open and API enabled before running any script that calls `connect_ib()`
 - If IBKR is down, `notify_scan.py` sends a concise Telegram warning and exits cleanly (no traceback)
+- `connect_ib_with_retry()` retries the connection up to 3 times with 10-second delays before failing; used by `main_daily_run.py`
+
+### Preventing TWS disconnects
+
+**Windows power settings:** Set the PC to never sleep while TWS is running. In Settings → System → Power & Sleep, set both "Screen" and "Sleep" to **Never** (or use a power plan with sleep disabled). A sleeping PC will drop the TWS connection and cause hourly scans to fail silently.
+
+**TWS auto-logoff:** TWS has a built-in daily auto-logoff that will disconnect the API session. To disable it: in TWS go to **Edit (or Configure) → Global Configuration → API → Settings** and uncheck **"Auto-logoff"** (or set the logoff time to a window outside your scan hours). Without this, TWS will log itself off mid-day regardless of activity.

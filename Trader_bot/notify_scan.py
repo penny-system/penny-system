@@ -287,8 +287,9 @@ def main():
         except Exception:
             mode = "hourly"
 
-    # Run scan + fill
-    run_pipeline()
+    # Run scan + fill — abort if pipeline failed (Telegram warning already sent inside)
+    if not run_pipeline():
+        return
 
     if not os.path.exists(DB_PATH):
         die(f"DB not found at {DB_PATH}")

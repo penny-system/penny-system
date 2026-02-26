@@ -6,7 +6,7 @@ import inspect
 import config
 from ib_insync import Stock
 
-from src_ibkr_client import connect_ib
+from src_ibkr_client import connect_ib_with_retry
 from src_storage import connect_db, ensure_schema, create_run, insert_recommendations
 
 import src_universe
@@ -299,7 +299,7 @@ def write_brief_file(run_id, recs):
 # ----------------------------
 
 def main():
-    ib = connect_ib()
+    ib = connect_ib_with_retry()
 
     symbols = build_universe(ib)
     print(f"Universe size (symbols): {len(symbols)}")

@@ -1,6 +1,7 @@
 # src_ibkr_client.py
 from __future__ import annotations
 
+import time
 from ib_insync import IB
 import config
 
@@ -22,6 +23,23 @@ def connect_ib() -> IB:
         pass
 
     return ib
+
+
+def connect_ib_with_retry(retries: int = 3, delay: int = 10) -> IB:
+    """
+    Connect to IBKR TWS with up to `retries` attempts, `delay` seconds apart.
+    Raises ConnectionError if all attempts fail.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return connect_ib()
+        except Exception as e:
+            last_exc = e
+            if attempt < retries:
+                print(f"[IBKR] Connection attempt {attempt}/{retries} failed: {e}. Retrying in {delay}s...")
+                time.sleep(delay)
+    raise ConnectionError(f"IBKR connection failed after {retries} attempts: {last_exc}")
 
 
 def _pick_first_float(values: list[str]) -> float | None:
