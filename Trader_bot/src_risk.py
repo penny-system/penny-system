@@ -1,66 +1,126 @@
 import config
 
 
-def _pct_change(a: float, b: float) -> float:
-    if b == 0:
-        return 0.0
-    return (a - b) / b
-
-
-def risk_score_and_flags(symbol: str, feat: dict, regime: dict | None = None, corr_to_holdings: float | None = None):
+def risk_score_and_flags(
+    symbol: str,
+    feat: dict,
+    sec_hits: int = 0,
+    sec_trigger_a: bool = False,
+    stocktwits_score: float = 0.0,
+) -> tuple:
     """
-    Returns: (risk_score, flags_string)
+    Weighted risk model. Each sub-factor is scored 0-100, multiplied by its
+    weight, and summed. Weights total 100% so output is naturally 0-100.
 
-    risk_score: 0 (low risk) to 100 (high risk)
-    flags: comma-separated tags
+    Pillars:
+      Market data (65%):
+        Liquidity / dollar vol    25%
+        Volume surge              20%
+        Intraday move (ret_1)     12%
+        Price level               8%
+
+      External signals (35%):
+        SEC EDGAR filings         15%
+        Realized volatility       12%
+        StockTwits pump signal    8%
+
+    Returns: (risk_score: float, flags: str)
     """
     flags = []
 
-    price = float(feat.get("ref_price", 0) or 0)
-    vol_surge = float(feat.get("vol_surge", 1.0) or 1.0)
-    dollar_vol = float(feat.get("dollar_vol", 0) or 0)
-    ret_1 = float(feat.get("ret_1", 0) or 0)
-    ret_5 = float(feat.get("ret_5", 0) or 0)
+    dollar_vol   = float(feat.get("dollar_vol",   0)   or 0)
+    vol_surge    = float(feat.get("vol_surge",     1.0) or 1.0)
+    ret_1        = float(feat.get("ret_1",         0)   or 0)
+    ref_price    = float(feat.get("ref_price",     0)   or 0)
+    realized_vol = float(feat.get("realized_vol",  0)   or 0)
 
-    risk = 25.0
+    # ------------------------------------------------------------------
+    # Market data sub-scores (0-100 each)
+    # ------------------------------------------------------------------
 
-    # --- Liquidity / turnover proxies ---
+    # Liquidity (25%) — low turnover = harder to exit, pump risk
     if dollar_vol < 250_000:
-        risk += 25
+        liq_score = 100
         flags.append("low_dollar_volume")
     elif dollar_vol < 1_000_000:
-        risk += 10
+        liq_score = 50
+        flags.append("moderate_dollar_volume")
+    else:
+        liq_score = 0
 
-    # --- Extreme volume spikes (often rug-pull risk) ---
+    # Volume surge (20%) — extreme spikes often signal rug-pulls
     if vol_surge >= 15:
-        risk += 25
+        vol_score = 100
         flags.append("extreme_volume_spike")
     elif vol_surge >= 7:
-        risk += 12
+        vol_score = 75
         flags.append("high_volume_spike")
+    elif vol_surge >= 3:
+        vol_score = 25
+    else:
+        vol_score = 0
 
-    # --- Very cheap stocks behave worse mechanically ---
-    if price < 0.75:
-        risk += 10
-        flags.append("very_low_price")
-
-    # --- Gap / shock proxy using 1d return ---
-    if abs(ret_1) > 0.12:
-        risk += 12
+    # Intraday move (12%) — gap/shock proxy
+    abs_ret = abs(ret_1)
+    if abs_ret > 0.12:
+        move_score = 100
         flags.append("high_intraday_move")
+    elif abs_ret > 0.05:
+        move_score = 50
+    else:
+        move_score = 0
 
-    # --- Regime penalty ---
-    if regime:
-        if regime.get("regime") == "risk_off":
-            risk += 10
-            flags.append("risk_off_regime")
+    # Price level (8%) — very cheap stocks are mechanically riskier
+    if ref_price < 0.75:
+        price_score = 100
+        flags.append("very_low_price")
+    elif ref_price < 1.00:
+        price_score = 50
+    else:
+        price_score = 0
 
-    # --- Crowding / correlation vs current holdings ---
-    if corr_to_holdings is not None:
-        if corr_to_holdings >= float(getattr(config, "CORR_FLAG_THRESHOLD", 0.60)):
-            risk += 12
-            flags.append(f"correlated_to_holdings_{corr_to_holdings:.2f}")
+    # ------------------------------------------------------------------
+    # External signal sub-scores (0-100 each)
+    # ------------------------------------------------------------------
 
-    # Clamp 0..100
-    risk = max(0.0, min(100.0, risk))
+    # SEC EDGAR (15%) — dilution / toxic financing filings
+    if sec_trigger_a or sec_hits >= 2:
+        sec_score = 100
+        flags.append("sec_dilution_risk")
+    elif sec_hits == 1:
+        sec_score = 50
+        flags.append("sec_filing_flagged")
+    else:
+        sec_score = 0
+
+    # Realized volatility (12%) — annualized from 1-min log returns
+    if realized_vol > 2.0:       # > 200% annualized
+        realvol_score = 100
+        flags.append("extreme_realized_vol")
+    elif realized_vol > 1.0:     # 100-200% annualized
+        realvol_score = 50
+        flags.append("high_realized_vol")
+    else:
+        realvol_score = 0
+
+    # StockTwits (8%) — pump-and-dump social signal
+    twits_score = float(stocktwits_score)
+    if twits_score >= 100:
+        flags.append("pump_signal")
+    elif twits_score >= 50:
+        flags.append("elevated_social_activity")
+
+    # ------------------------------------------------------------------
+    # Weighted sum
+    # ------------------------------------------------------------------
+    risk = (
+        0.25 * liq_score +
+        0.20 * vol_score +
+        0.12 * move_score +
+        0.08 * price_score +
+        0.15 * sec_score +
+        0.12 * realvol_score +
+        0.08 * twits_score
+    )
+
     return float(risk), ("none" if not flags else ",".join(flags))

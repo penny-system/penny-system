@@ -1,3 +1,6 @@
+import math as _math
+
+
 def compute_features_from_bars(bars):
     """
     bars: list of 1-min bars for 1 trading day (useRTH=True)
@@ -8,6 +11,7 @@ def compute_features_from_bars(bars):
       - vol_surge (last hour volume / avg hourly volume)
       - dollar_vol (sum(volume) * ref_price)
       - breakout (1 if last close near day's high)
+      - realized_vol (annualized realized volatility from 1-min log returns)
     """
     if not bars or len(bars) < 80:
         return None
@@ -55,6 +59,20 @@ def compute_features_from_bars(bars):
         if (ref_price - day_low) / rng >= 0.80:
             breakout = 1
 
+    # --- Realized volatility (annualized from 1-min log returns) ---
+    log_returns = [
+        _math.log(closes[i] / closes[i - 1])
+        for i in range(1, len(closes))
+        if closes[i - 1] > 0 and closes[i] > 0
+    ]
+    if len(log_returns) >= 2:
+        mean_r = sum(log_returns) / len(log_returns)
+        variance = sum((r - mean_r) ** 2 for r in log_returns) / (len(log_returns) - 1)
+        # Annualize: sqrt(390 min/day * 252 days/year)
+        realized_vol = _math.sqrt(variance) * _math.sqrt(390 * 252)
+    else:
+        realized_vol = 0.0
+
     return {
         "ref_price": float(ref_price),
         "day_high": float(day_high),
@@ -64,4 +82,5 @@ def compute_features_from_bars(bars):
         "vol_surge": float(vol_surge),
         "dollar_vol": float(dollar_vol),
         "breakout": int(breakout),
+        "realized_vol": float(realized_vol),
     }

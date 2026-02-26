@@ -8,6 +8,7 @@ from ib_insync import Stock
 
 from src_ibkr_client import connect_ib_with_retry
 from src_storage import connect_db, ensure_schema, create_run, insert_recommendations
+from src_news import fetch_sec_risk, fetch_stocktwits_score
 
 import src_universe
 import src_features
@@ -154,6 +155,16 @@ def score_all_candidates(feats_by_symbol):
 
     recs = []
     for sym, feat in feats_by_symbol.items():
+        # Compute risk inputs once per symbol — not per horizon
+        sec = fetch_sec_risk(sym)
+        twits = fetch_stocktwits_score(sym)
+        risk_score, _ = src_risk.risk_score_and_flags(
+            sym, feat,
+            sec_hits=sec["sec_hits"],
+            sec_trigger_a=sec["sec_trigger_a"],
+            stocktwits_score=twits,
+        )
+
         for horizon in ["swing", "momentum"]:
             try:
                 out = score_fn(feat, horizon)
@@ -170,6 +181,7 @@ def score_all_candidates(feats_by_symbol):
                 r.setdefault("decision", "WATCH")
                 r.setdefault("score_total", 0.0)
                 r.setdefault("confidence", 0.0)
+                r.setdefault("risk_score", risk_score)
                 recs.append(r)
 
             elif isinstance(out, (list, tuple)):
@@ -186,7 +198,7 @@ def score_all_candidates(feats_by_symbol):
                     "decision": "BUY" if score_total >= 80 else "WATCH",
                     "score_total": score_total,
                     "confidence": confidence,
-                    "risk_score": src_risk.risk_score_and_flags(sym, feat)[0],
+                    "risk_score": risk_score,
                     "ref_price": ref,
                     "stop_price": round(ref * (1.0 - float(config.STOP_LOSS_PCT)), 2) if ref else 0.0,
                     "take_price": round(ref * (1.0 + float(config.TAKE_PROFIT_PCT)), 2) if ref else 0.0,

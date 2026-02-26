@@ -249,3 +249,58 @@ def fetch_and_analyze_news(symbol: str, limit: int = 5):
         "trigger_a_hits": trigger_a_hits,
         "sec_hits": sec_hits,
     }
+
+
+def fetch_sec_risk(symbol: str, limit: int = 10) -> dict:
+    """
+    Fetch SEC EDGAR filings for symbol and return risk counts.
+    Returns: {"sec_hits": int, "sec_trigger_a": bool}
+    Fail-open (returns zeros) if EDGAR is unreachable.
+    """
+    try:
+        titles = fetch_sec_filings(symbol, limit=limit)
+        if not titles:
+            return {"sec_hits": 0, "sec_trigger_a": False}
+        analysis = _analyze_titles(titles, "SEC")
+        return {
+            "sec_hits": len(analysis.get("sec_hits", [])),
+            "sec_trigger_a": len(analysis.get("trigger_a_hits", [])) > 0,
+        }
+    except Exception:
+        return {"sec_hits": 0, "sec_trigger_a": False}
+
+
+def fetch_stocktwits_score(symbol: str) -> float:
+    """
+    Fetch StockTwits sentiment for symbol and return a pump-risk score 0-100.
+    Signal: high bullish ratio among tagged messages = pump-and-dump risk.
+    Fail-open (returns 0.0) if API is unreachable.
+    """
+    try:
+        url = f"https://api.stocktwits.com/api/2/streams/symbol/{symbol}.json"
+        resp = requests.get(url, timeout=10,
+                            headers={"User-Agent": "PennySystemBot/1.0 (research)"})
+        if resp.status_code != 200:
+            return 0.0
+        messages = resp.json().get("messages", [])
+        bullish = sum(
+            1 for m in messages
+            if (m.get("entities") or {}).get("sentiment", {}) and
+               m["entities"]["sentiment"].get("basic") == "Bullish"
+        )
+        bearish = sum(
+            1 for m in messages
+            if (m.get("entities") or {}).get("sentiment", {}) and
+               m["entities"]["sentiment"].get("basic") == "Bearish"
+        )
+        total_tagged = bullish + bearish
+        if total_tagged < 5:
+            return 0.0
+        bullish_ratio = bullish / total_tagged
+        if bullish_ratio > 0.70:
+            return 100.0
+        elif bullish_ratio > 0.50:
+            return 50.0
+        return 0.0
+    except Exception:
+        return 0.0
