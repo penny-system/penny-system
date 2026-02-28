@@ -212,7 +212,7 @@ def score_all_candidates(feats_by_symbol):
 # Sizing (optional)
 # ----------------------------
 
-def apply_sizing(recs):
+def apply_sizing(recs, ib=None):
     recs = normalize_recs(recs)
 
     for r in recs:
@@ -227,7 +227,7 @@ def apply_sizing(recs):
         return recs
 
     try:
-        sized = size_fn(buy_recs)
+        sized = size_fn(buy_recs, ib=ib)
     except Exception:
         return recs
 
@@ -319,7 +319,7 @@ def main():
 
     feats_by_symbol = build_features(ib, symbols)
     recs = score_all_candidates(feats_by_symbol)
-    recs = apply_sizing(recs)
+    recs = apply_sizing(recs, ib=ib)
 
     conn = connect_db()
     ensure_schema(conn)
@@ -332,6 +332,16 @@ def main():
     print(f"Run created: {run_id} ({datetime.now().date()})")
     print(f"Saved brief: {brief_path}")
     print("Next: run approve.py to approve BUY recs and place bracket orders.")
+
+    # Safety check: alert if any open position has breached its stop level
+    try:
+        from src_trade_monitor import monitor_stop_loss, is_market_hours
+        if is_market_hours():
+            monitor_stop_loss(ib)
+        else:
+            print("[MONITOR] Outside market hours — skipping stop-loss check.")
+    except Exception as e:
+        print(f"[MONITOR] Stop-loss check failed (non-fatal): {e}")
 
     ib.disconnect()
 
