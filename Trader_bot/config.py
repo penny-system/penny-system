@@ -69,6 +69,9 @@ RISK_WEIGHT = 0.4
 # Max symbols loaded from static universe file
 STATIC_POOL_MAX = 200
 
+# Cap for weekly dynamic universe refresh (src_universe_refresh.py)
+MAX_UNIVERSE_SIZE = 150
+
 # Allow dynamic scanner symbols to be merged
 ENABLE_DYNAMIC_UNIVERSE = True
 

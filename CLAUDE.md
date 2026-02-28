@@ -49,9 +49,41 @@ python notify_scan.py --mode hourly
 
 # Start Telegram settings bot
 python telegram_bot.py
+
+# Weekly dynamic universe refresh (from Trader_bot\)
+python src_universe_refresh.py
 ```
 
 `notify_scan.py` is designed to be run from the **project root** (`penny-system\`) — it calls `Trader_bot\main_daily_run.py` and `Trader_bot\fill_suggested_qty.py` as subprocesses. The `.bat` files in `Trader_bot\` are for Windows Task Scheduler.
+
+`run_weekly_refresh.bat` activates the venv and runs `src_universe_refresh.py`. Add to Task Scheduler to run every Sunday at 8:00 PM.
+
+---
+
+## Weekly Universe Refresh
+
+`src_universe_refresh.py` rebuilds `Trader_bot\universe_dynamic.txt` weekly using live data.
+
+### Sources (in order)
+1. **IBKR scanner** — two scan types merged: `TOP_PERC_GAIN` and `HIGH_VS_13W_HL`. Filters: price $1–$8, avg volume ≥ 500k, US exchanges (`STK.US.MAJOR`).
+2. **yfinance validation** — each IBKR symbol is validated (price still in range, 3-month avg vol ≥ 500k). Dropped symbols are logged.
+3. **yf.screen() extras** — `day_gainers` screen pulled for additional candidates (best-effort; silently skipped if not supported).
+4. **Static CSV fallback** — if combined results < 20 symbols, supplements from `scan_active.csv` + `scan_gainers.csv` (validated via yfinance).
+
+### Output
+- `Trader_bot\universe_dynamic.txt` — one symbol per line, sorted, capped at `MAX_UNIVERSE_SIZE = 150`
+- `Trader_bot\output\universe_refresh_log.txt` — append-only log with counts per source
+
+### Universe Load Priority (`load_static_universe()`)
+```
+1st: universe_dynamic.txt  (if exists and non-empty)
+2nd: scan_*.csv files      (manually exported scans)
+3rd: universe_static.txt   (final hardcoded fallback)
+```
+Logs: `[Universe] Loaded from: <source> -- N symbols`
+
+### IBKR clientId
+`src_universe_refresh.py` standalone uses **clientId 20** (dedicated, avoids pipeline conflicts).
 
 ---
 
@@ -142,3 +174,15 @@ OPENAI_MODEL=gpt-4o-mini      # optional override
 **Windows power settings:** Set the PC to never sleep while TWS is running. In Settings → System → Power & Sleep, set both "Screen" and "Sleep" to **Never** (or use a power plan with sleep disabled). A sleeping PC will drop the TWS connection and cause hourly scans to fail silently.
 
 **TWS auto-logoff:** TWS has a built-in daily auto-logoff that will disconnect the API session. To disable it: in TWS go to **Edit (or Configure) → Global Configuration → API → Settings** and uncheck **"Auto-logoff"** (or set the logoff time to a window outside your scan hours). Without this, TWS will log itself off mid-day regardless of activity.
+
+### Bracket order persistence (GTC)
+
+Bracket child orders (stop-loss and take-profit) are placed with `tif="GTC"` (Good Till Cancelled). This is critical — the IBKR default is `tif="DAY"`, which means child orders **expire at end of session**. A DAY stop-loss placed intraday will not protect a position held overnight or across multiple days.
+
+- **Parent BUY order**: `tif="DAY"` (intentional — stale unfilled BUY orders should not linger)
+- **Stop-loss SELL stop**: `tif="GTC"` — persists across sessions until filled or manually cancelled
+- **Take-profit SELL limit**: `tif="GTC"` — same
+
+Child orders also share an `ocaGroup` (One Cancels All). When either fills, IBKR automatically cancels the other, preventing a double-exit or accidental short.
+
+**If TWS disconnects after bracket placement**: GTC orders placed via TWS API persist on IBKR's servers and survive restarts. The position remains protected as long as the original bracket was placed and confirmed. Use `/portfolio` in the Telegram bot to verify open positions and their associated orders after any TWS restart.

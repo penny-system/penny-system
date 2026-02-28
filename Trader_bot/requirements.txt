@@ -6,3 +6,4 @@ pandas
 python-dotenv==1.2.1
 python-telegram-bot==22.6
 requests==2.32.5
+yfinance
