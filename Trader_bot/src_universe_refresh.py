@@ -135,7 +135,7 @@ def _yfinance_screen_extra() -> list[str]:
     """
     try:
         import yfinance as yf
-        result = yf.screen("day_gainers", size=100)
+        result = yf.screen("day_gainers", count=100)
         quotes = result.get("quotes", [])
         symbols = []
         for q in quotes:
