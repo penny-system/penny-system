@@ -7,7 +7,8 @@ import config
 from ib_insync import Stock
 
 from src_ibkr_client import connect_ib_with_retry
-from src_storage import connect_db, ensure_schema, create_run, insert_recommendations
+from src_storage import (connect_db, ensure_schema, create_run,
+                         insert_recommendations, snapshot_recommendations)
 from src_news import fetch_sec_risk, fetch_stocktwits_score
 
 import src_universe
@@ -149,21 +150,48 @@ def build_features(ib, symbols):
 # ----------------------------
 
 def score_all_candidates(feats_by_symbol):
+    """
+    Score every symbol+horizon combination.
+
+    Returns:
+        recs             — list[dict] of normalized recommendation dicts
+        intermediate_data — dict keyed by uppercase symbol with raw inputs:
+            {
+              "SYM": {
+                "feat":        full feature dict from src_features,
+                "sec":         {sec_hits, sec_trigger_a},
+                "twits":       float (stocktwits score),
+                "risk_flags":  str,
+                "setup_types": {horizon: setup_type_str},
+              }
+            }
+    """
     score_fn = getattr(src_scoring, "score_candidate", None)
     if not callable(score_fn):
         raise ImportError("Expected src_scoring.score_candidate but it was not found.")
 
     recs = []
+    intermediate_data = {}
+
     for sym, feat in feats_by_symbol.items():
         # Compute risk inputs once per symbol — not per horizon
         sec = fetch_sec_risk(sym)
         twits = fetch_stocktwits_score(sym)
-        risk_score, _ = src_risk.risk_score_and_flags(
+        risk_score, risk_flags = src_risk.risk_score_and_flags(
             sym, feat,
             sec_hits=sec["sec_hits"],
             sec_trigger_a=sec["sec_trigger_a"],
             stocktwits_score=twits,
         )
+
+        inter = {
+            "feat": feat,
+            "sec": sec,
+            "twits": twits,
+            "risk_flags": risk_flags,
+            "setup_types": {},
+        }
+        intermediate_data[sym.upper()] = inter
 
         for horizon in ["swing", "momentum"]:
             try:
@@ -182,6 +210,7 @@ def score_all_candidates(feats_by_symbol):
                 r.setdefault("score_total", 0.0)
                 r.setdefault("confidence", 0.0)
                 r.setdefault("risk_score", risk_score)
+                inter["setup_types"][horizon] = r.get("setup_type", "")
                 recs.append(r)
 
             elif isinstance(out, (list, tuple)):
@@ -191,6 +220,8 @@ def score_all_candidates(feats_by_symbol):
                 rationale = str(out[3]) if len(out) > 3 else ""
 
                 ref = float(feat.get("ref_price", feat.get("close", 0.0)) or 0.0)
+
+                inter["setup_types"][horizon] = setup_type
 
                 recs.append({
                     "symbol": sym,
@@ -205,7 +236,7 @@ def score_all_candidates(feats_by_symbol):
                     "rationale": f"{setup_type} | {rationale}".strip(),
                 })
 
-    return normalize_recs(recs)
+    return normalize_recs(recs), intermediate_data
 
 
 # ----------------------------
@@ -318,13 +349,14 @@ def main():
     print(f"Universe size (symbols): {len(symbols)}")
 
     feats_by_symbol = build_features(ib, symbols)
-    recs = score_all_candidates(feats_by_symbol)
+    recs, intermediate_data = score_all_candidates(feats_by_symbol)
     recs = apply_sizing(recs, ib=ib)
 
     conn = connect_db()
     ensure_schema(conn)
     run_id = create_run(conn)
     insert_recommendations(conn, run_id, recs)
+    snapshot_recommendations(conn, run_id, recs, intermediate_data)
     conn.close()
 
     brief_path = write_brief_file(run_id, recs)
@@ -335,7 +367,7 @@ def main():
 
     # Safety check: alert if any open position has breached its stop level
     try:
-        from src_trade_monitor import monitor_stop_loss, is_market_hours
+        from src_trade_tracker import monitor_stop_loss, is_market_hours
         if is_market_hours():
             monitor_stop_loss(ib)
         else:

@@ -349,6 +349,11 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/positions       View open IBKR positions\n"
         "/portfolio       Holdings with P&amp;L and daily change\n"
         "\n"
+        "📈 <b>Analytics</b>\n"
+        "/history [N]     Last N closed trades (default 20)\n"
+        "/performance     Win rate, P&amp;L, key observations\n"
+        "/report          Generate full HTML performance report\n"
+        "\n"
         "⚙️ <b>Settings</b>\n"
         "/purse 3000      Set purse (CAD)\n"
         "/maxpos 6        Set max positions\n"
@@ -976,6 +981,145 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(body + summary + warnings, parse_mode="HTML")
 
 
+# ---------------------------------------------------------------------------
+# Analytics commands: /history, /performance, /report
+# ---------------------------------------------------------------------------
+
+async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show last N closed trades from the database."""
+    if not _is_allowed(update):
+        await update.message.reply_text("⛔ Not authorized.")
+        return
+
+    try:
+        n = int(context.args[0]) if context.args else 20
+        n = max(1, min(n, 50))
+    except (ValueError, IndexError):
+        n = 20
+
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        cur  = conn.cursor()
+        cur.execute("""
+            SELECT ct.symbol, ct.closed_at, ct.entry_price, ct.exit_price,
+                   ct.entry_qty, ct.net_pnl, ct.outcome, ct.exit_reason, ct.hold_seconds
+            FROM closed_trades ct
+            ORDER BY ct.trade_id DESC
+            LIMIT ?
+        """, (n,))
+        rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"DB error: {e}")
+        return
+
+    if not rows:
+        await update.message.reply_text("No closed trades recorded yet.")
+        return
+
+    lines = [f"<b>Last {len(rows)} closed trade(s):</b>\n"]
+    for sym, closed_at, entry, exit_p, qty, net_pnl, outcome, reason, hold_s in rows:
+        dt   = (closed_at or "")[:10]
+        pnl  = float(net_pnl or 0.0)
+        sign = "+" if pnl >= 0 else ""
+        outcome_s = {"WIN": "WIN", "LOSS": "LOSS", "BREAKEVEN": "EVEN"}.get(outcome, outcome or "?")
+        hold_m = f"{(hold_s or 0)//60}m" if (hold_s or 0) < 3600 else f"{(hold_s or 0)//3600}h"
+        reason_s = (reason or "?").replace("_", "-")
+        lines.append(
+            f"<b>{sym}</b> {dt} · {outcome_s} · {sign}${pnl:.2f} · "
+            f"{qty}sh @ ${entry:.3f}→${exit_p:.3f} · {reason_s} · {hold_m}"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def performance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run the learning engine and show key observations."""
+    if not _is_allowed(update):
+        await update.message.reply_text("⛔ Not authorized.")
+        return
+
+    await update.message.reply_text("Analysing trade history...")
+
+    def _run():
+        from src_learning import run_learning_analysis
+        from src_storage import ensure_schema, connect_db
+        conn = connect_db()
+        ensure_schema(conn)
+        try:
+            return run_learning_analysis(conn)
+        finally:
+            conn.close()
+
+    try:
+        loop     = asyncio.get_event_loop()
+        _fut     = concurrent.futures.Future()
+        t        = threading.Thread(target=lambda: _fut.set_result(_run()), daemon=True)
+        t.start()
+        analysis = await asyncio.wrap_future(_fut)
+    except Exception as e:
+        await update.message.reply_text(f"Analysis error: {e}")
+        return
+
+    ov   = analysis.get("overview", {})
+    obs  = analysis.get("observations", [])
+    te   = analysis.get("temporal", {})
+    n    = ov.get("total_trades", 0)
+    wr   = ov.get("win_rate", 0.0)
+    pnl  = ov.get("total_net_pnl", 0.0)
+    pnl_s = ("+" if pnl >= 0 else "") + f"${pnl:.2f}"
+    trend = te.get("trend", "N/A")
+
+    header = (
+        f"<b>Performance Analysis</b>\n"
+        f"Trades: {n}  ·  Win rate: {wr*100:.1f}%  ·  Net P&L: {pnl_s}  ·  Trend: {trend}\n\n"
+        f"<b>Observations:</b>"
+    )
+
+    if obs:
+        body = "\n• ".join([""] + obs)
+    else:
+        body = "\nNo observations yet — need more closed trades."
+
+    footer = "\n\n<i>Use /report to generate the full HTML report.</i>"
+
+    await update.message.reply_text(header + body + footer, parse_mode="HTML")
+
+
+async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Generate the full HTML performance report and send file path."""
+    if not _is_allowed(update):
+        await update.message.reply_text("⛔ Not authorized.")
+        return
+
+    await update.message.reply_text("Generating report...")
+
+    def _run():
+        from src_report import generate_report
+        from src_storage import ensure_schema, connect_db
+        conn = connect_db()
+        ensure_schema(conn)
+        try:
+            return generate_report(conn)
+        finally:
+            conn.close()
+
+    try:
+        _fut  = concurrent.futures.Future()
+        t     = threading.Thread(target=lambda: _fut.set_result(_run()), daemon=True)
+        t.start()
+        path  = await asyncio.wrap_future(_fut)
+    except Exception as e:
+        await update.message.reply_text(f"Report error: {e}")
+        return
+
+    await update.message.reply_text(
+        f"Report saved:\n<code>{path}</code>\n\n"
+        f"Open it in any browser for the full analysis.",
+        parse_mode="HTML",
+    )
+
+
 def main():
     token = getattr(config, "TELEGRAM_BOT_TOKEN", None)
     if not token or "PASTE_YOUR_BOT_TOKEN_HERE" in token:
@@ -1004,6 +1148,18 @@ def main():
     app.add_handler(CommandHandler("positions", positions_handler))
     app.add_handler(CommandHandler("portfolio", portfolio_handler))
     app.add_handler(CommandHandler("brief", brief_handler))
+
+    # Analytics commands
+    app.add_handler(CommandHandler("history", history_handler))
+    app.add_handler(CommandHandler("performance", performance_handler))
+    app.add_handler(CommandHandler("report", report_handler))
+
+    # Start fill monitor in background thread (daemon — won't block shutdown)
+    try:
+        from src_trade_tracker import start_fill_monitor
+        _fill_monitor = start_fill_monitor()
+    except Exception as e:
+        print(f"[BOT] Fill monitor failed to start (non-fatal): {e}")
 
     print("Telegram bot running. Press Ctrl+C to stop.")
     app.run_polling()

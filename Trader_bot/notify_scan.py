@@ -16,8 +16,8 @@ sys.path.insert(0, _ROOT_DIR)
 import config
 import anthropic
 from src_format import DIVIDER, _fmt_date, fmt_candidate, fmt_watch_candidate, fmt_buy_message
-from src_news import fetch_and_analyze_news
-from src_storage import ensure_schema, update_gate_result
+from src_news import fetch_and_analyze_news, RISK_KEYWORDS
+from src_storage import ensure_schema, update_gate_result, backfill_snapshot_gate
 from src_settings import apply_overrides_to_config
 
 DB_PATH = getattr(config, "DB_PATH", None) or os.path.join(_BOT_DIR, "output", "trader.sqlite")
@@ -287,8 +287,12 @@ def main():
         except Exception:
             mode = "hourly"
 
+    dry_run = "--dry-run" in sys.argv
+    if dry_run:
+        print(f"[DRY-RUN] mode={mode} — using existing DB data, no Telegram send, no state save.")
+
     # Run scan + fill — abort if pipeline failed (Telegram warning already sent inside)
-    if not run_pipeline():
+    if not dry_run and not run_pipeline():
         return
 
     if not os.path.exists(DB_PATH):
@@ -313,12 +317,12 @@ def main():
         max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
         # Split candidates: already-owned symbols go to add-to-position section
-        owned = get_owned_symbols()
+        owned = set() if dry_run else get_owned_symbols()
         new_recs = [r for r in recs if str(r[0]).upper() not in owned]
         add_recs  = [r for r in recs if str(r[0]).upper() in owned]
 
         lines = []
-        lines.append(f"🟦 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
+        lines.append(f"📊 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
         lines.append(f"💰 Purse: ${purse_val:,.0f}  |  Max: {max_pos}")
 
         state = load_state()
@@ -333,6 +337,15 @@ def main():
 
             news = fetch_and_analyze_news(sym, limit=3)
             has_news_risk = bool(news.get("risk_hits"))
+            news_risk_note = None
+            if has_news_risk:
+                matched_kws = []
+                for h in (news.get("risk_hits") or [])[:3]:
+                    for kw in RISK_KEYWORDS:
+                        if kw in h.lower() and kw not in matched_kws:
+                            matched_kws.append(kw)
+                if matched_kws:
+                    news_risk_note = "headline mentions " + "/".join(matched_kws[:3])
             gate_note = None
 
             # Trigger A (2+ keywords in same headline), deduped
@@ -344,7 +357,7 @@ def main():
                 trigger_a_new.append(f"• {sym}: {h[:80]}")
 
             # Trigger C: BUY candidate + Trigger A conflict → Claude soft gate
-            if news.get("trigger_a_hits"):
+            if not dry_run and news.get("trigger_a_hits"):
                 gate_key = f"GATE|{run_id}|{sym}".lower().strip()
                 if gate_key not in state["sent_trigger_a"]:
                     payload = {
@@ -361,12 +374,15 @@ def main():
                     gate = soft_gate_review(payload)
                     update_gate_result(con, run_id, sym,
                                        gate["decision"], gate["confidence"], gate["reason"])
+                    backfill_snapshot_gate(con, run_id, sym,
+                                           gate["decision"], gate["confidence"], gate["reason"])
                     gate_note = (
-                        f"🛡 Gate: <b>{gate['decision']}</b> "
+                        f"⚠️ Gate: <b>{gate['decision']}</b> "
                         f"({gate['confidence']*100:.0f}%) — {gate['reason'][:80]}"
                     )
                     state["sent_trigger_a"][gate_key] = True
 
+            card_emoji = "⚠️" if (has_news_risk or gate_note) else "✅"
             lines.append("")
             lines.append(DIVIDER)
             lines.append(fmt_candidate({
@@ -379,7 +395,7 @@ def main():
                 "take_price":    float(r[6] or 0),
                 "suggested_qty": int(r[7] or 0),
                 "rationale":     r[8] if len(r) > 8 else "",
-            }, gate_note=gate_note, has_news_risk=has_news_risk, emoji="🟩"))
+            }, gate_note=gate_note, has_news_risk=has_news_risk, news_risk_note=news_risk_note, emoji=card_emoji))
 
         if not new_recs:
             lines.append("\nNo new BUY candidates in this scan.")
@@ -414,15 +430,20 @@ def main():
         lines.append("/approve SYMBOL — place a bracket order")
         lines.append("/skip SYMBOL — dismiss for this run")
 
-        send_telegram("\n".join(lines), parse_mode="HTML")
-        save_state(state)
+        msg = "\n".join(lines)
+        if dry_run:
+            print("[DRY-RUN] Morning brief (not sent):\n")
+            print(msg)
+        else:
+            send_telegram(msg, parse_mode="HTML")
+            save_state(state)
+            print("[OK] Morning brief sent.")
         con.close()
-        print("[OK] Morning brief sent.")
         return
 
     # --- MODE: hourly (notify only if actionable + avoid spamming same run/signature) ---
     # Split owned vs new before any dedup check
-    owned = get_owned_symbols()
+    owned = set() if dry_run else get_owned_symbols()
     new_recs = [r for r in recs if str(r[0]).upper() not in owned]
     add_recs  = [r for r in recs if str(r[0]).upper() in owned]
 
@@ -440,7 +461,7 @@ def main():
     signature = "|".join([f"{r[0]}:{int(r[7] or 0)}" for r in new_recs[:MAX_ITEMS_IN_MESSAGE]])
     state = load_state()
 
-    if state.get("last_action_signature", "") == signature:
+    if not dry_run and state.get("last_action_signature", "") == signature:
         print("Candidate set unchanged since last notification. No notification sent.")
         return
 
@@ -450,7 +471,7 @@ def main():
     max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
     lines = []
-    lines.append(f"🎆 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
+    lines.append(f"📊 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
     lines.append(f"💰 Purse: ${purse_val:,.0f}  |  Max: {max_pos}")
     lines.append("")
 
@@ -465,6 +486,15 @@ def main():
 
         news = fetch_and_analyze_news(sym, limit=3)
         has_news_risk = bool(news.get("risk_hits"))
+        news_risk_note = None
+        if has_news_risk:
+            matched_kws = []
+            for h in (news.get("risk_hits") or [])[:3]:
+                for kw in RISK_KEYWORDS:
+                    if kw in h.lower() and kw not in matched_kws:
+                        matched_kws.append(kw)
+            if matched_kws:
+                news_risk_note = "headline mentions " + "/".join(matched_kws[:3])
         gate_note = None
 
         # Trigger A (dedup)
@@ -476,7 +506,7 @@ def main():
             trigger_a_new.append(f"• {sym}: {h[:80]}")
 
         # Soft gate only when conflict exists (Trigger C): BUY candidate + Trigger A headlines
-        if news.get("trigger_a_hits"):
+        if not dry_run and news.get("trigger_a_hits"):
             gate_key = f"GATE|{run_id}|{sym}".lower().strip()
             if gate_key not in state["sent_trigger_a"]:
                 payload = {
@@ -493,12 +523,15 @@ def main():
                 gate = soft_gate_review(payload)
                 update_gate_result(con, run_id, sym,
                                    gate["decision"], gate["confidence"], gate["reason"])
+                backfill_snapshot_gate(con, run_id, sym,
+                                       gate["decision"], gate["confidence"], gate["reason"])
                 gate_note = (
-                    f"🛡 Gate: <b>{gate['decision']}</b> "
+                    f"⚠️ Gate: <b>{gate['decision']}</b> "
                     f"({gate['confidence']*100:.0f}%) — {gate['reason'][:80]}"
                 )
                 state["sent_trigger_a"][gate_key] = True
 
+        card_emoji = "⚠️" if (has_news_risk or gate_note) else "✅"
         lines.append(DIVIDER)
         lines.append(fmt_candidate({
             "symbol":       str(r[0]).upper(),
@@ -510,7 +543,7 @@ def main():
             "take_price":   float(r[6] or 0),
             "suggested_qty": int(r[7] or 0),
             "rationale":    r[8] if len(r) > 8 else "",
-        }, gate_note=gate_note, has_news_risk=has_news_risk))
+        }, gate_note=gate_note, has_news_risk=has_news_risk, news_risk_note=news_risk_note, emoji=card_emoji))
 
     # After loop: Trigger A block
     lines.extend(_format_trigger_a_block(trigger_a_new))
@@ -528,14 +561,17 @@ def main():
     lines.append("/approve SYMBOL — place a bracket order")
     lines.append("/skip SYMBOL — dismiss for this run")
 
-    send_telegram("\n".join(lines), parse_mode="HTML")
-
-    state["last_action_run_id"] = run_id
-    state["last_action_signature"] = signature
-    save_state(state)
+    msg = "\n".join(lines)
+    if dry_run:
+        print("[DRY-RUN] Hourly notification (not sent):\n")
+        print(msg)
+    else:
+        send_telegram(msg, parse_mode="HTML")
+        state["last_action_run_id"] = run_id
+        state["last_action_signature"] = signature
+        save_state(state)
+        print("[OK] Hourly actionable notification sent.")
     con.close()
-
-    print("[OK] Hourly actionable notification sent.")
 
 
 

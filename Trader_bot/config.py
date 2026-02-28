@@ -131,3 +131,44 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
+
+
+# ============================
+# TRADE TRACKING
+# ============================
+
+# clientId used by the fill monitor / reconciliation thread in src_trade_tracker.py
+FILL_MONITOR_CLIENT_ID = 21
+
+# How often to reconcile open positions against IBKR (minutes)
+RECONCILIATION_INTERVAL_MINUTES = 5
+
+# Drawdown thresholds for stop-loss alert (% expressed as negative decimals)
+# WARNING fires first; ALERT fires when the stop is breached
+STOP_WARNING_THRESHOLD_PCT = -0.10   # -10%
+STOP_ALERT_THRESHOLD_PCT   = -0.15   # -15%  (mirrors STOP_LOSS_PCT)
+
+# Commission estimation fallback when IBKR does not report it
+# $0.0035/share, min $0.35, max 1% of trade value
+COMMISSION_PER_SHARE = 0.0035
+COMMISSION_MIN        = 0.35
+COMMISSION_MAX_PCT    = 0.01   # 1% of trade value
+
+
+# ============================
+# LEARNING ENGINE
+# ============================
+
+# Minimum sample size before a signal bucket appears in reports
+LEARNING_MIN_SAMPLE = 5
+
+# Sample sizes for confidence tiers (see learning-model-brief.md)
+LEARNING_LOW_SAMPLE      = 14    # N <= this → preliminary
+LEARNING_MODERATE_SAMPLE = 29    # N <= this → emerging
+# N > LEARNING_MODERATE_SAMPLE → reliable (no constant needed)
+
+# HTML reports are saved here (email delivery stubbed for future)
+REPORT_OUTPUT_DIR = "output/reports"
+
+# DB path (all scripts should use this via config rather than hardcoding)
+DB_PATH = "output/trader.sqlite"
