@@ -985,56 +985,155 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Analytics commands: /history, /performance, /report
 # ---------------------------------------------------------------------------
 
+_MONTH_ABBREVS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+def _parse_history_args(args: list[str]):
+    """
+    Parse /history args into (days_back, month_num, symbol_filter, label).
+    Priority: month abbrev > numeric days > symbol ticker.
+    Supports 0, 1, or 2 args. Default: last 30 days.
+    """
+    days_back, month_num, sym_filter = None, None, None
+
+    for arg in args:
+        a = arg.strip().lower()
+        if a in _MONTH_ABBREVS:
+            month_num = _MONTH_ABBREVS[a]
+        elif a.isdigit():
+            days_back = max(1, min(int(a), 365))
+        else:
+            sym_filter = arg.upper()
+
+    if month_num is None and days_back is None and sym_filter is None:
+        days_back = 30   # default
+
+    if month_num is not None:
+        label = f"{arg.capitalize()} trades"
+    elif days_back is not None:
+        label = f"Last {days_back} day(s)"
+    elif sym_filter:
+        label = f"{sym_filter} trades"
+    else:
+        label = "Last 30 days"
+
+    return days_back, month_num, sym_filter, label
+
+
 async def history_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show last N closed trades from the database."""
+    """Show recent trade history with flexible filtering."""
     if not _is_allowed(update):
         await update.message.reply_text("⛔ Not authorized.")
         return
 
-    try:
-        n = int(context.args[0]) if context.args else 20
-        n = max(1, min(n, 50))
-    except (ValueError, IndexError):
-        n = 20
+    days_back, month_num, sym_filter, label = _parse_history_args(context.args or [])
 
     try:
+        from datetime import timedelta
         conn = sqlite3.connect(_DB_PATH)
         cur  = conn.cursor()
-        cur.execute("""
-            SELECT ct.symbol, ct.closed_at, ct.entry_price, ct.exit_price,
-                   ct.entry_qty, ct.net_pnl, ct.outcome, ct.exit_reason, ct.hold_seconds
-            FROM closed_trades ct
-            ORDER BY ct.trade_id DESC
-            LIMIT ?
-        """, (n,))
+
+        conditions, params = [], []
+        if month_num is not None:
+            year = datetime.now().year
+            conditions.append("strftime('%Y-%m', closed_at) = ?")
+            params.append(f"{year}-{month_num:02d}")
+        elif days_back is not None:
+            since = (datetime.utcnow() - timedelta(days=days_back)).isoformat()
+            conditions.append("closed_at >= ?")
+            params.append(since)
+        if sym_filter:
+            conditions.append("UPPER(TRIM(symbol)) = ?")
+            params.append(sym_filter)
+
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        cur.execute(f"""
+            SELECT symbol, closed_at, entry_price, exit_price, entry_qty,
+                   net_pnl, gross_pnl, outcome, exit_reason, hold_seconds, pnl_pct
+            FROM closed_trades {where}
+            ORDER BY trade_id DESC LIMIT 50
+        """, params)
         rows = cur.fetchall()
+
+        # Summary stats
+        cur.execute(f"""
+            SELECT COUNT(*), SUM(net_pnl), SUM(gross_pnl),
+                   SUM(commission_total), AVG(hold_duration_hours)
+            FROM closed_trades {where}
+        """, params)
+        s = cur.fetchone()
         conn.close()
     except Exception as e:
         await update.message.reply_text(f"DB error: {e}")
         return
 
     if not rows:
-        await update.message.reply_text("No closed trades recorded yet.")
+        await update.message.reply_text(f"No closed trades in this period ({label}).")
         return
 
-    lines = [f"<b>Last {len(rows)} closed trade(s):</b>\n"]
-    for sym, closed_at, entry, exit_p, qty, net_pnl, outcome, reason, hold_s in rows:
-        dt   = (closed_at or "")[:10]
-        pnl  = float(net_pnl or 0.0)
-        sign = "+" if pnl >= 0 else ""
-        outcome_s = {"WIN": "WIN", "LOSS": "LOSS", "BREAKEVEN": "EVEN"}.get(outcome, outcome or "?")
-        hold_m = f"{(hold_s or 0)//60}m" if (hold_s or 0) < 3600 else f"{(hold_s or 0)//3600}h"
-        reason_s = (reason or "?").replace("_", "-")
-        lines.append(
-            f"<b>{sym}</b> {dt} · {outcome_s} · {sign}${pnl:.2f} · "
-            f"{qty}sh @ ${entry:.3f}→${exit_p:.3f} · {reason_s} · {hold_m}"
+    total_n, total_net, total_gross, total_fees, avg_hold = s
+    total_n    = total_n or 0
+    total_net  = float(total_net or 0)
+    total_gross = float(total_gross or 0)
+    total_fees  = float(total_fees or 0)
+    avg_hold    = float(avg_hold or 0)
+    wins   = sum(1 for r in rows if r[7] == "WIN")
+    losses = sum(1 for r in rows if r[7] == "LOSS")
+    wr     = int(wins / total_n * 100) if total_n else 0
+
+    # Profit factor
+    win_sum  = sum(float(r[5] or 0) for r in rows if r[7] == "WIN")
+    loss_sum = abs(sum(float(r[5] or 0) for r in rows if r[7] == "LOSS"))
+    pf_str   = f"{win_sum/loss_sum:.2f}" if loss_sum else "∞"
+
+    net_sign = "+" if total_net >= 0 else ""
+    best  = max(rows, key=lambda r: float(r[5] or 0))
+    worst = min(rows, key=lambda r: float(r[5] or 0))
+
+    def _pnl_s(r):
+        p = float(r[5] or 0)
+        return ("+" if p >= 0 else "") + f"${p:.2f}"
+
+    def _hold_s(secs):
+        s = int(secs or 0)
+        if s >= 3600: return f"{s//3600}h {(s%3600)//60}m"
+        return f"{s//60}m"
+
+    header = (
+        f"<b>📊 TRADE HISTORY — {label}</b>\n\n"
+        f"Total: {total_n} trades  ·  {wins}W {losses}L ({wr}%)\n"
+        f"Gross P&L: {net_sign}${total_gross:.2f}\n"
+        f"Total Fees: -${abs(total_fees):.2f}\n"
+        f"Net P&L: {net_sign}${total_net:.2f}\n"
+        f"Profit Factor: {pf_str}  ·  Avg Hold: {avg_hold:.1f}h\n\n"
+        f"Best:  <b>{best[0]}</b> {_pnl_s(best)}\n"
+        f"Worst: <b>{worst[0]}</b> {_pnl_s(worst)}\n\n"
+        f"<b>Recent:</b>"
+    )
+
+    outcome_icon = {"WIN": "✅", "LOSS": "🔴", "BREAKEVEN": "⚪"}
+    trade_lines = []
+    for sym, closed_at, entry, exit_p, qty, net_pnl, gross_pnl, outcome, reason, hold_s, pnl_pct in rows[:20]:
+        ico = outcome_icon.get(outcome or "", "•")
+        dt  = (closed_at or "")[:10]
+        pnl = float(net_pnl or 0)
+        pct = float(pnl_pct or 0)
+        sgn = "+" if pnl >= 0 else ""
+        rsn = (reason or "?").replace("_", "-")
+        trade_lines.append(
+            f"  {ico} <b>{sym}</b>  {sgn}${pnl:.2f} ({sgn}{pct:.1f}%)  {rsn}  {_hold_s(hold_s)}  <i>{dt}</i>"
         )
 
-    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+    await update.message.reply_text(
+        header + "\n" + "\n".join(trade_lines),
+        parse_mode="HTML"
+    )
 
 
 async def performance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Run the learning engine and show key observations."""
+    """Run the learning engine and show performance analysis with signal quality and trend."""
     if not _is_allowed(update):
         await update.message.reply_text("⛔ Not authorized.")
         return
@@ -1052,7 +1151,6 @@ async def performance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn.close()
 
     try:
-        loop     = asyncio.get_event_loop()
         _fut     = concurrent.futures.Future()
         t        = threading.Thread(target=lambda: _fut.set_result(_run()), daemon=True)
         t.start()
@@ -1064,26 +1162,94 @@ async def performance_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     ov   = analysis.get("overview", {})
     obs  = analysis.get("observations", [])
     te   = analysis.get("temporal", {})
-    n    = ov.get("total_trades", 0)
-    wr   = ov.get("win_rate", 0.0)
-    pnl  = ov.get("total_net_pnl", 0.0)
-    pnl_s = ("+" if pnl >= 0 else "") + f"${pnl:.2f}"
-    trend = te.get("trend", "N/A")
+    sig  = analysis.get("signals", {})
+    cm   = analysis.get("combinations", {})
 
-    header = (
-        f"<b>Performance Analysis</b>\n"
-        f"Trades: {n}  ·  Win rate: {wr*100:.1f}%  ·  Net P&L: {pnl_s}  ·  Trend: {trend}\n\n"
-        f"<b>Observations:</b>"
-    )
+    n        = ov.get("total_trades", 0)
+    wins     = ov.get("wins", 0)
+    losses   = ov.get("losses", 0)
+    wr       = ov.get("win_rate", 0.0)
+    pnl      = ov.get("total_net_pnl", 0.0)
+    avg_hold = ov.get("avg_hold_hours", 0.0)
+    tier     = ov.get("confidence_tier", "insufficient")
+    pf       = ov.get("profit_factor")
+    exp      = ov.get("expectancy", 0.0)
+
+    pnl_s  = ("+" if pnl >= 0 else "") + f"${pnl:.2f}"
+    pf_s   = f"{pf:.2f}" if pf is not None else "inf"
+    exp_s  = ("+" if exp >= 0 else "") + f"${exp:.2f}"
+
+    tier_label = {
+        "insufficient": f"(need {max(0, 5 - n)} more trades for signal analysis)",
+        "preliminary":  "(preliminary — patterns not yet reliable)",
+        "emerging":     "(emerging — treat as directional)",
+        "reliable":     "(statistically reliable)",
+    }.get(tier, "")
+
+    # Trend line
+    trend       = te.get("trend", "STABLE")
+    first_wr    = te.get("first_half", {}).get("win_rate", 0.0)
+    last10_wr   = te.get("last_10", {}).get("win_rate", 0.0)
+    trend_emoji = {"IMPROVING": "📈", "DEGRADING": "📉", "STABLE": "→"}.get(trend, "→")
+
+    # Signal quality bullets — pick best bucket per key signal
+    sig_lines = []
+
+    for b in (sig.get("breakout") or []):
+        if b.get("label") == "Breakout" and b.get("n", 0) >= 5:
+            sig_lines.append(f"• Breakout=1: {b['win_rate']*100:.0f}% WR  (N={b['n']})")
+            break
+
+    vs_buckets = [b for b in (sig.get("vol_surge") or []) if b.get("n", 0) >= 5]
+    if vs_buckets:
+        best_vs = max(vs_buckets, key=lambda b: b["win_rate"])
+        sig_lines.append(
+            f"• Vol surge {best_vs['label']}: {best_vs['win_rate']*100:.0f}% WR  (N={best_vs['n']})"
+        )
+
+    conf_buckets = [b for b in (sig.get("confidence") or []) if b.get("n", 0) >= 5]
+    if conf_buckets:
+        best_conf = max(conf_buckets, key=lambda b: b["win_rate"])
+        sig_lines.append(
+            f"• Confidence {best_conf['label']}: {best_conf['win_rate']*100:.0f}% WR  (N={best_conf['n']})"
+        )
+
+    best_combos = cm.get("best", [])
+    if best_combos:
+        bc = best_combos[0]
+        sig_lines.append(
+            f"• {bc['label']}: {bc['win_rate']*100:.0f}% WR  (N={bc['n']})"
+        )
+
+    # Assemble message
+    lines = [
+        "<b>📊 PERFORMANCE ANALYSIS</b>",
+        "",
+        f"<b>{n} trades</b>  {tier_label}",
+        f"{wins}W / {losses}L  ·  Win Rate: <b>{wr*100:.1f}%</b>",
+        f"Net P&L: <b>{pnl_s}</b>  ·  Avg Hold: {avg_hold:.1f}h",
+        f"Profit Factor: <b>{pf_s}</b>  ·  Expectancy: <b>{exp_s}</b>",
+    ]
+
+    if n >= 10:
+        lines += [
+            "",
+            f"{trend_emoji} Trend: Last 10: {last10_wr*100:.0f}% WR  vs  "
+            f"First half: {first_wr*100:.0f}% WR  →  {trend}",
+        ]
+
+    if sig_lines:
+        lines += ["", "<b>🔬 Signal Quality</b>"] + sig_lines
 
     if obs:
-        body = "\n• ".join([""] + obs)
+        lines += ["", "<b>Observations:</b>"]
+        lines += [f"• {o}" for o in obs[:5]]
     else:
-        body = "\nNo observations yet — need more closed trades."
+        lines += ["", "No observations yet — need more closed trades."]
 
-    footer = "\n\n<i>Use /report to generate the full HTML report.</i>"
+    lines += ["", "<i>Use /report for the full HTML analysis.</i>"]
 
-    await update.message.reply_text(header + body + footer, parse_mode="HTML")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):

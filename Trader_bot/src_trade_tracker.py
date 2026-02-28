@@ -38,7 +38,14 @@ from src_storage import (connect_db, ensure_schema,
 LOG_PATH     = os.path.join(_BOT_DIR, "output", "stop_loss_alerts.log")
 TRACKER_LOG  = os.path.join(_BOT_DIR, "output", "trade_tracker.log")
 
-_DEFAULT_THRESHOLD = float(getattr(config, "STOP_LOSS_PCT", 0.15))
+_DEFAULT_THRESHOLD  = float(getattr(config, "STOP_LOSS_PCT",           0.15))
+_WARNING_THRESHOLD  = abs(float(getattr(config, "STOP_WARNING_THRESHOLD_PCT", -0.10)))
+
+# Symbols known to appear as phantom positions on IBKR paper accounts — skip in reconciliation
+_PHANTOM_SYMBOLS: set[str] = {"AAPL"}
+
+# Track symbols that have already received a -10% warning this session (resets on restart)
+_warned_symbols: set[str] = set()
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +231,18 @@ def monitor_stop_loss(ib, conn=None, drawdown_threshold: float = None) -> list:
         _tracker_log(f"reqTickers failed: {e}")
         return alerts
 
+    # Load DB stop prices for cross-reference
+    db_stop_prices: dict[str, float] = {}
+    if conn is not None:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT UPPER(TRIM(symbol)), stop_price FROM open_positions WHERE status='open'"
+            )
+            db_stop_prices = {row[0]: float(row[1] or 0.0) for row in cur.fetchall()}
+        except Exception:
+            pass
+
     for pos, ticker in zip(active, tickers):
         sym      = pos.contract.symbol.upper()
         avg_cost = float(pos.avgCost or 0)
@@ -237,7 +256,10 @@ def monitor_stop_loss(ib, conn=None, drawdown_threshold: float = None) -> list:
             print(f"[MONITOR] {sym}: current price unavailable — skipping.")
             continue
 
-        drawdown = (current_price - avg_cost) / avg_cost
+        drawdown  = (current_price - avg_cost) / avg_cost
+        stop_price = db_stop_prices.get(sym, 0.0)
+        stop_note  = f" Expected stop: ${stop_price:.2f} — NOT TRIGGERED" if stop_price and current_price < stop_price else ""
+
         print(
             f"[MONITOR] {sym}: entry=${avg_cost:.4f}  "
             f"current=${current_price:.4f}  drawdown={drawdown*100:.1f}%"
@@ -247,16 +269,28 @@ def monitor_stop_loss(ib, conn=None, drawdown_threshold: float = None) -> list:
             pct = abs(drawdown * 100)
             msg = (
                 f"STOP ALERT: {sym} is down {pct:.1f}% "
-                f"(entry ${avg_cost:.2f} -> current ${current_price:.2f}). "
-                f"Stop-loss may not have triggered. Immediate review required."
+                f"(entry ${avg_cost:.2f} -> current ${current_price:.2f}).{stop_note} "
+                f"Immediate review required."
             )
             _tracker_log(f"*** {msg}")
             _log_alert(sym, avg_cost, current_price, drawdown)
             _send_telegram(msg)
+            _warned_symbols.discard(sym)   # reset warning so it fires again if needed
             alerts.append({
                 "symbol": sym, "avg_cost": avg_cost,
                 "current_price": current_price, "drawdown": drawdown,
             })
+
+        elif drawdown <= -_WARNING_THRESHOLD and sym not in _warned_symbols:
+            pct = abs(drawdown * 100)
+            away = f"  Stop at ${stop_price:.2f} (${current_price - stop_price:+.2f} away)" if stop_price else ""
+            msg = (
+                f"DRAWDOWN WARNING: {sym} is down {pct:.1f}% "
+                f"(entry ${avg_cost:.2f} -> current ${current_price:.2f}).{away}"
+            )
+            _tracker_log(f"WARNING: {msg}")
+            _send_telegram(msg)
+            _warned_symbols.add(sym)
 
     if not alerts:
         print("[MONITOR] All positions within stop-loss threshold.")
@@ -298,7 +332,12 @@ class FillMonitor:
     # -- internal ----------------------------------------------------------
 
     def _run_loop(self):
+        import asyncio
         from ib_insync import IB
+
+        # ib_insync uses asyncio internally; daemon threads have no event loop by default
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         ib = IB()
         self._ib = ib
@@ -315,7 +354,8 @@ class FillMonitor:
             _tracker_log(f"FillMonitor IBKR connection failed: {e}")
             return
 
-        ib.execDetailsEvent += self._on_exec_details
+        ib.execDetailsEvent      += self._on_exec_details
+        ib.commissionReportEvent += self._on_commission_report
 
         interval_secs  = int(getattr(config, "RECONCILIATION_INTERVAL_MINUTES", 5)) * 60
         last_reconcile = 0.0
@@ -372,6 +412,42 @@ class FillMonitor:
             })
         except Exception as e:
             _tracker_log(f"_on_exec_details error: {e}")
+
+    def _on_commission_report(self, trade, fill, report):
+        """
+        ib_insync callback — fires when IBKR sends the async commission report.
+        Updates the commission field on the matching open_positions or closed_trades row.
+        """
+        try:
+            if not report or not report.execId:
+                return
+            commission = float(report.commission or 0.0)
+            if commission <= 0:
+                return
+            exec_id = report.execId
+            conn = connect_db()
+            try:
+                cur = conn.cursor()
+                # Try open_positions first (entry fill)
+                cur.execute(
+                    "UPDATE open_positions SET commission=?, commission_source='ibkr' "
+                    "WHERE ibkr_exec_id=?",
+                    (commission, exec_id)
+                )
+                if cur.rowcount == 0:
+                    # Try closed_trades (exit fill)
+                    cur.execute(
+                        "UPDATE closed_trades SET commission_total = commission_total - "
+                        "(SELECT COALESCE(commission,0) FROM open_positions WHERE ibkr_exec_id=ibkr_exec_id_entry) "
+                        "+ ? + ? WHERE ibkr_exec_id_exit=?",
+                        (commission, 0, exec_id)
+                    )
+                conn.commit()
+                _tracker_log(f"Commission updated: exec_id={exec_id} comm=${commission:.4f}")
+            finally:
+                conn.close()
+        except Exception as e:
+            _tracker_log(f"_on_commission_report error: {e}")
 
     def _process_fill(self, d: dict):
         """Write a fill to the database. Idempotent on exec_id for entries."""
@@ -501,6 +577,7 @@ class FillMonitor:
                     f"exit=${fill_price:.4f} gross=${gross_pnl:+.2f} "
                     f"net=${net_pnl:+.2f} ({outcome}) reason={exit_reason}"
                 )
+                _warned_symbols.discard(sym)   # clear warning memory on close
                 self._send_exit_notification(sym, trade_id, {
                     "entry_price": entry_price,
                     "exit_price":  fill_price,
@@ -576,6 +653,11 @@ class FillMonitor:
                 exec_id = fill.execution.execId
                 sym     = fill.contract.symbol.upper()
 
+                # Skip known phantom positions on paper accounts
+                if sym in _PHANTOM_SYMBOLS:
+                    _tracker_log(f"Reconciliation: skipping phantom symbol {sym}")
+                    continue
+
                 conn = connect_db()
                 try:
                     # Check if this exit is already recorded
@@ -610,40 +692,93 @@ class FillMonitor:
         _tracker_log("Reconciliation complete.")
 
     def _send_exit_notification(self, sym: str, trade_id: int, data: dict):
-        """Send Telegram notification when a trade closes."""
+        """Send Telegram notification when a trade closes, followed by session summary."""
         outcome      = data.get("outcome", "?")
         net_pnl      = float(data.get("net_pnl", 0.0))
         gross_pnl    = float(data.get("gross_pnl", 0.0))
+        commission   = float(data.get("commission_total", abs(gross_pnl - net_pnl)))
         exit_reason  = data.get("exit_reason", "manual")
         entry_price  = float(data.get("entry_price", 0.0))
         exit_price   = float(data.get("exit_price", 0.0))
         fill_qty     = int(data.get("fill_qty", 0))
         hold_seconds = int(data.get("hold_seconds", 0))
+        entry_slip   = float(data.get("entry_slippage", 0.0))
+        exit_slip    = float(data.get("exit_slippage", 0.0))
 
-        hold_str = ""
-        if hold_seconds > 3600:
-            h = hold_seconds // 3600
-            m = (hold_seconds % 3600) // 60
-            hold_str = f"{h}h {m}m"
-        elif hold_seconds > 60:
-            hold_str = f"{hold_seconds // 60}m"
+        # Hold time string
+        if hold_seconds >= 3600:
+            h, rem = divmod(hold_seconds, 3600)
+            hold_str = f"{h}h {rem//60}m"
+        elif hold_seconds >= 60:
+            hold_str = f"{hold_seconds//60}m"
         else:
             hold_str = f"{hold_seconds}s"
 
-        pnl_sign  = "+" if net_pnl >= 0 else ""
-        emoji     = "WIN" if outcome == "WIN" else ("LOSS" if outcome == "LOSS" else "EVEN")
-        reason_map = {"take_profit": "Take-profit hit", "stop_loss": "Stop-loss triggered",
-                      "manual": "Manually closed", "reconciled": "Reconciliation close"}
-        reason_str = reason_map.get(exit_reason, exit_reason)
+        # P&L percentage
+        trade_value = entry_price * fill_qty
+        pnl_pct     = (net_pnl / trade_value * 100) if trade_value else 0.0
+        gross_pct   = (gross_pnl / trade_value * 100) if trade_value else 0.0
+
+        # Emoji and header
+        if outcome == "WIN":
+            header_emoji = "✅"
+            trend_emoji  = "📈"
+        elif outcome == "LOSS":
+            header_emoji = "🔴"
+            trend_emoji  = "📉"
+        else:
+            header_emoji = "⚪"
+            trend_emoji  = "📊"
+
+        g_sign = "+" if gross_pnl >= 0 else ""
+        n_sign = "+" if net_pnl   >= 0 else ""
+        p_sign = "+" if pnl_pct   >= 0 else ""
 
         msg = (
-            f"Trade closed: {sym} [{emoji}]\n"
-            f"{reason_str}\n"
-            f"Entry: ${entry_price:.4f}  Exit: ${exit_price:.4f}  Qty: {fill_qty}\n"
-            f"Gross: {pnl_sign}${gross_pnl:.2f}  Net: {pnl_sign}${net_pnl:.2f}\n"
-            f"Hold: {hold_str}  |  Trade #{trade_id}"
+            f"{header_emoji} TRADE CLOSED — {outcome}\n\n"
+            f"{trend_emoji} {sym}\n"
+            f"Entry: ${entry_price:.4f}  ->  Exit: ${exit_price:.4f}\n"
+            f"Qty: {fill_qty} shares  •  Hold: {hold_str}\n\n"
+            f"Gross P&L: {g_sign}${gross_pnl:.2f} ({g_sign}{gross_pct:.1f}%)\n"
+            f"Fees: -${commission:.2f}\n"
+            f"Net P&L: {n_sign}${net_pnl:.2f} ({p_sign}{pnl_pct:.1f}%)\n\n"
+            f"Exit: {exit_reason}\n"
+            f"Slippage: entry {entry_slip:+.4f}  •  exit {exit_slip:+.4f}"
         )
+
+        # Session summary
+        try:
+            conn = connect_db()
+            summary = _get_session_summary(conn)
+            conn.close()
+            msg += f"\n\n{summary}"
+        except Exception:
+            pass
+
         _send_telegram(msg)
+
+
+def _get_session_summary(conn) -> str:
+    """Query current-month closed trades and return a one-line summary string."""
+    try:
+        month_start = datetime.utcnow().strftime("%Y-%m-01")
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT outcome, net_pnl FROM closed_trades
+            WHERE closed_at >= ?
+        """, (month_start,))
+        rows = cur.fetchall()
+        if not rows:
+            return "📊 Session: no closed trades this month"
+        wins    = sum(1 for r in rows if r[0] == "WIN")
+        losses  = sum(1 for r in rows if r[0] == "LOSS")
+        net     = sum(float(r[1] or 0) for r in rows)
+        total   = wins + losses
+        wr      = int(wins / total * 100) if total else 0
+        sign    = "+" if net >= 0 else ""
+        return f"📊 Session: {wins}W {losses}L ({wr}%)  •  Net: {sign}${net:.2f}"
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------

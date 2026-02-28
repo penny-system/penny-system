@@ -1,6 +1,7 @@
 # src_storage.py
 import os
 import sqlite3
+from datetime import datetime
 import config
 
 
@@ -45,7 +46,7 @@ def ensure_schema(conn: sqlite3.Connection):
     )
     """)
 
-    # Add columns if missing
+    # Add columns if missing (recommendations)
     cur.execute("PRAGMA table_info(recommendations)")
     cols = [r[1] for r in cur.fetchall()]
     if "suggested_qty" not in cols:
@@ -93,6 +94,20 @@ def ensure_schema(conn: sqlite3.Connection):
         UNIQUE(run_id, symbol, horizon)
     )
     """)
+
+    # Add columns to recommendation_snapshots if missing
+    cur.execute("PRAGMA table_info(recommendation_snapshots)")
+    rs_cols = [r[1] for r in cur.fetchall()]
+    for col, defn in [
+        ("snapshot_at",       "TEXT"),
+        ("decision",          "TEXT"),
+        ("news_risk_note",    "TEXT"),
+        ("purse_usd",         "REAL"),
+        ("max_positions",     "INTEGER"),
+        ("active_positions",  "INTEGER"),
+    ]:
+        if col not in rs_cols:
+            cur.execute(f"ALTER TABLE recommendation_snapshots ADD COLUMN {col} {defn}")
 
     # ---------------------------------------------------------------------------
     # open_positions — one row per IBKR fill; closed when exit fill detected
@@ -148,6 +163,23 @@ def ensure_schema(conn: sqlite3.Connection):
     )
     """)
 
+    # Add columns to closed_trades if missing
+    cur.execute("PRAGMA table_info(closed_trades)")
+    ct_cols = [r[1] for r in cur.fetchall()]
+    for col, defn in [
+        ("pnl_pct",            "REAL"),
+        ("hold_duration_hours", "REAL"),
+    ]:
+        if col not in ct_cols:
+            cur.execute(f"ALTER TABLE closed_trades ADD COLUMN {col} {defn}")
+
+    # Unique index on ibkr_exec_id_exit — prevents duplicate exit inserts on reconnect
+    cur.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_closed_trades_exec_exit
+        ON closed_trades(ibkr_exec_id_exit)
+        WHERE ibkr_exec_id_exit IS NOT NULL
+    """)
+
     # ---------------------------------------------------------------------------
     # learning_snapshots — periodic analytics snapshots written by src_learning.py
     # ---------------------------------------------------------------------------
@@ -163,6 +195,25 @@ def ensure_schema(conn: sqlite3.Connection):
         analysis_json TEXT
     )
     """)
+
+    # Add columns to learning_snapshots if missing
+    cur.execute("PRAGMA table_info(learning_snapshots)")
+    ls_cols = [r[1] for r in cur.fetchall()]
+    for col, defn in [
+        ("period_label",  "TEXT"),
+        ("win_count",     "INTEGER"),
+        ("loss_count",    "INTEGER"),
+        ("gross_pnl",     "REAL"),
+        ("total_fees",    "REAL"),
+        ("avg_win_pnl",   "REAL"),
+        ("avg_loss_pnl",  "REAL"),
+        ("profit_factor", "REAL"),
+        ("expectancy",    "REAL"),
+        ("signal_analysis", "TEXT"),
+        ("observations",    "TEXT"),
+    ]:
+        if col not in ls_cols:
+            cur.execute(f"ALTER TABLE learning_snapshots ADD COLUMN {col} {defn}")
 
     conn.commit()
 
@@ -217,20 +268,27 @@ def snapshot_recommendations(conn: sqlite3.Connection, run_id: int,
         feat = inter.get("feat", {})
         sec = inter.get("sec", {})
 
+        snapshot_at = datetime.utcnow().isoformat() + "+00:00"
+        purse_usd   = float(getattr(config, "TRADE_PURSE_USD", 0.0) or 0.0)
+        max_pos     = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+
         cur.execute("""
         INSERT OR IGNORE INTO recommendation_snapshots
-        (run_id, symbol, horizon,
+        (run_id, symbol, horizon, decision, snapshot_at,
          score_total, confidence, risk_score, risk_flags,
          ref_price, stop_price, take_price, suggested_qty,
          setup_type, rationale,
          vol_surge, ret_1, ret_5, dollar_vol, breakout, realized_vol,
          sec_hits, sec_trigger_a, stocktwits_score,
+         news_risk_note, purse_usd, max_positions,
          gate_decision, gate_confidence, gate_reason)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
         """, (
             run_id,
             sym,
             horizon,
+            r.get("decision", "BUY"),
+            snapshot_at,
             float(r.get("score_total", 0.0)),
             float(r.get("confidence", 0.0)),
             float(r.get("risk_score", 0.0)),
@@ -250,6 +308,9 @@ def snapshot_recommendations(conn: sqlite3.Connection, run_id: int,
             int(sec.get("sec_hits", 0) or 0),
             int(sec.get("sec_trigger_a", 0) or 0),
             float(inter.get("twits", 0.0) or 0.0),
+            inter.get("news_risk_note", ""),
+            purse_usd,
+            max_pos,
         ))
 
     conn.commit()
@@ -334,16 +395,22 @@ def close_position(conn: sqlite3.Connection, position_id: int, exit_data: dict) 
     commission_total = entry_commission + commission_exit
     commission_source_out = exit_data.get("commission_source", commission_source or "ibkr")
 
+    net_pnl      = float(exit_data.get("net_pnl", 0.0) or 0.0)
+    hold_seconds = int(exit_data.get("hold_seconds", 0) or 0)
+    trade_value  = float(entry_price or 0.0) * int(entry_qty or 0)
+    pnl_pct      = (net_pnl / trade_value * 100) if trade_value else 0.0
+    hold_hours   = hold_seconds / 3600.0
+
     cur.execute("""
     INSERT INTO closed_trades
     (position_id, snapshot_id, symbol,
      entry_price, entry_qty, exit_price, exit_qty,
      exit_reason, gross_pnl, commission_total, commission_source,
-     net_pnl, outcome, hold_seconds,
+     net_pnl, outcome, hold_seconds, pnl_pct, hold_duration_hours,
      opened_at, closed_at,
      entry_slippage, exit_slippage,
      ibkr_exec_id_entry, ibkr_exec_id_exit)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         position_id,
         snapshot_id,
@@ -356,9 +423,11 @@ def close_position(conn: sqlite3.Connection, position_id: int, exit_data: dict) 
         float(exit_data.get("gross_pnl", 0.0) or 0.0),
         commission_total,
         commission_source_out,
-        float(exit_data.get("net_pnl", 0.0) or 0.0),
+        net_pnl,
         exit_data.get("outcome", "LOSS"),
-        int(exit_data.get("hold_seconds", 0) or 0),
+        hold_seconds,
+        pnl_pct,
+        hold_hours,
         opened_at,
         exit_data.get("closed_at"),
         float(exit_data.get("entry_slippage", 0.0) or 0.0),

@@ -102,12 +102,19 @@ def _section_overview(ov: dict) -> str:
         "reliable":     "(statistically reliable)",
     }.get(tier, "")
 
+    pf      = ov.get("profit_factor")
+    exp     = ov.get("expectancy", 0.0)
+    pf_str  = f"{pf:.2f}" if pf is not None else "∞"
+    exp_str = _fmt_pnl(exp)
+
     stats = [
         ("Total Trades", str(n)),
         ("Win Rate", f"{wr*100:.1f}%"),
         ("Wins / Losses", f"{wins} / {losses}"),
         ("Total Net P&L", _fmt_pnl(tot_pnl)),
         ("Avg Net P&L", _fmt_pnl(avg_pnl)),
+        ("Profit Factor", pf_str),
+        ("Expectancy", exp_str),
         ("Avg Hold Time", f"{avg_hold:.1f}h"),
     ]
     boxes = "".join(
@@ -262,12 +269,64 @@ def _section_slippage(sl: dict) -> str:
 """
 
 
+def _section_open_positions(conn: sqlite3.Connection) -> str:
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT symbol, entry_price, entry_qty, stop_price, take_price, entry_time
+            FROM open_positions
+            WHERE status = 'open'
+            ORDER BY entry_time DESC
+        """)
+        rows = cur.fetchall()
+    except Exception:
+        return ""
+
+    if not rows:
+        return ""
+
+    now = datetime.now()
+    tr_rows = ""
+    for sym, entry_p, qty, stop_p, take_p, entry_time in rows:
+        try:
+            et       = datetime.fromisoformat(entry_time) if entry_time else None
+            hold_str = _hold_str(int((now - et).total_seconds())) if et else "—"
+        except Exception:
+            hold_str = "—"
+        stop_str = f"${stop_p:.4f}" if stop_p else "—"
+        take_str = f"${take_p:.4f}" if take_p else "—"
+        tr_rows += (
+            f"<tr>"
+            f"<td><strong>{sym or '—'}</strong></td>"
+            f"<td>${entry_p:.4f}</td>"
+            f"<td>{qty}</td>"
+            f"<td>{stop_str}</td>"
+            f"<td>{take_str}</td>"
+            f"<td>{hold_str}</td>"
+            f"</tr>"
+        )
+
+    return f"""
+<h2>Open Positions ({len(rows)})</h2>
+<table>
+<tr><th>Symbol</th><th>Entry</th><th>Qty</th><th>Stop</th><th>Take</th><th>Hold</th></tr>
+{tr_rows}
+</table>"""
+
+
 def _section_trade_history(conn: sqlite3.Connection) -> str:
     cur = conn.cursor()
     cur.execute("""
         SELECT ct.symbol, ct.closed_at, ct.entry_price, ct.exit_price,
-               ct.exit_qty, ct.net_pnl, ct.outcome, ct.exit_reason, ct.hold_seconds
+               ct.exit_qty, ct.net_pnl, ct.outcome, ct.exit_reason, ct.hold_seconds,
+               rs.breakout, rs.vol_surge, rs.confidence, rs.gate_decision
         FROM closed_trades ct
+        LEFT JOIN recommendation_snapshots rs
+            ON rs.snapshot_id = (
+                SELECT snapshot_id FROM recommendation_snapshots
+                WHERE symbol = ct.symbol
+                ORDER BY snapshot_id DESC LIMIT 1
+            )
         ORDER BY ct.trade_id DESC
         LIMIT 100
     """)
@@ -276,9 +335,23 @@ def _section_trade_history(conn: sqlite3.Connection) -> str:
         return ""
 
     tr_rows = ""
-    for sym, closed_at, entry, exit_p, qty, net_pnl, outcome, reason, hold_s in rows:
+    for (sym, closed_at, entry, exit_p, qty, net_pnl, outcome, reason,
+         hold_s, breakout, vol_surge, confidence, gate) in rows:
         cls = _outcome_cls(outcome or "")
         dt  = closed_at[:10] if closed_at else "—"
+
+        # Key signals summary
+        sig_parts = []
+        if breakout == 1:
+            sig_parts.append("brkout")
+        if vol_surge is not None:
+            sig_parts.append(f"vol {vol_surge:.1f}x")
+        if confidence is not None:
+            sig_parts.append(f"conf {confidence:.2f}")
+        if gate and gate not in ("", "APPROVE"):
+            sig_parts.append(f"gate={gate}")
+        sig_str = ", ".join(sig_parts) if sig_parts else "—"
+
         tr_rows += (
             f"<tr>"
             f"<td><strong>{sym or '—'}</strong></td>"
@@ -290,6 +363,7 @@ def _section_trade_history(conn: sqlite3.Connection) -> str:
             f"<td class='{cls}'>{outcome or '—'}</td>"
             f"<td>{reason or '—'}</td>"
             f"<td>{_hold_str(hold_s or 0)}</td>"
+            f"<td style='font-size:0.8em;color:#8b949e;'>{sig_str}</td>"
             f"</tr>"
         )
 
@@ -297,7 +371,7 @@ def _section_trade_history(conn: sqlite3.Connection) -> str:
 <h2>Trade History (last 100)</h2>
 <table>
 <tr><th>Symbol</th><th>Date</th><th>Entry</th><th>Exit</th>
-    <th>Qty</th><th>Net P&L</th><th>Outcome</th><th>Reason</th><th>Hold</th></tr>
+    <th>Qty</th><th>Net P&L</th><th>Outcome</th><th>Reason</th><th>Hold</th><th>Signals</th></tr>
 {tr_rows}
 </table>"""
 
@@ -318,6 +392,7 @@ def _build_html(analysis: dict, conn: sqlite3.Connection) -> str:
     body = (
         _section_overview(ov)
         + _section_observations(obs)
+        + _section_open_positions(conn)
         + _section_temporal(te)
         + _section_signals(sig)
         + _section_combinations(cm)

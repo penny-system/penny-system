@@ -408,16 +408,31 @@ def _overview_stats(trades: list[dict]) -> dict:
     hold_times = [int(t.get("hold_seconds") or 0) for t in trades if t.get("hold_seconds")]
     avg_hold   = _safe_div(sum(hold_times), len(hold_times)) / 3600 if hold_times else 0.0
 
+    win_pnls  = [t.get("net_pnl", 0.0) or 0.0 for t in wins]
+    loss_pnls = [t.get("net_pnl", 0.0) or 0.0 for t in losses]
+    avg_win_pnl  = _safe_div(sum(win_pnls),  len(win_pnls))  if win_pnls  else 0.0
+    avg_loss_pnl = _safe_div(sum(loss_pnls), len(loss_pnls)) if loss_pnls else 0.0
+    win_sum  = sum(win_pnls)
+    loss_sum = abs(sum(loss_pnls))
+    profit_factor = _safe_div(win_sum, loss_sum) if loss_sum else None  # None = no losses yet
+    wr_dec    = _safe_div(len(wins), n)
+    lr_dec    = _safe_div(len(losses), n)
+    expectancy = (wr_dec * avg_win_pnl) + (lr_dec * avg_loss_pnl)
+
     return {
-        "total_trades":  n,
-        "wins":          len(wins),
-        "losses":        len(losses),
-        "win_rate":      _safe_div(len(wins), n),
-        "total_net_pnl": total_pnl,
-        "avg_net_pnl":   avg_pnl,
+        "total_trades":   n,
+        "wins":           len(wins),
+        "losses":         len(losses),
+        "win_rate":       wr_dec,
+        "total_net_pnl":  total_pnl,
+        "avg_net_pnl":    avg_pnl,
         "avg_hold_hours": avg_hold,
-        "exit_reasons":  exit_reasons,
+        "exit_reasons":   exit_reasons,
         "confidence_tier": _confidence_tier(n),
+        "avg_win_pnl":    avg_win_pnl,
+        "avg_loss_pnl":   avg_loss_pnl,
+        "profit_factor":  profit_factor,
+        "expectancy":     expectancy,
     }
 
 
@@ -551,18 +566,51 @@ def run_learning_analysis(conn: sqlite3.Connection) -> dict:
 
 def save_learning_snapshot(conn: sqlite3.Connection, analysis: dict):
     """Persist an analysis snapshot to learning_snapshots table."""
-    ov = analysis.get("overview", {})
+    ov   = analysis.get("overview", {})
+    obs  = analysis.get("observations", [])
+    sig  = analysis.get("signals", {})
+    te   = analysis.get("temporal", {})
+
+    wins   = ov.get("wins", 0)
+    losses = ov.get("losses", 0)
+    n      = ov.get("total_trades", 0)
+    pf     = ov.get("profit_factor")
+    exp    = ov.get("expectancy", 0.0)
+
+    # Gross P&L = net P&L + fees (we don't store gross separately in learning, use net as proxy)
+    gross_pnl = float(ov.get("total_net_pnl", 0.0))   # best approximation
+
+    # Determine period label from temporal trend
+    trend       = te.get("trend", "STABLE")
+    period_label = f"all-time ({trend})"
+
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO learning_snapshots
-        (total_trades, win_rate, avg_net_pnl, total_net_pnl, avg_hold_hours, analysis_json)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO learning_snapshots (
+            total_trades, win_rate, avg_net_pnl, total_net_pnl, avg_hold_hours,
+            period_label, win_count, loss_count, gross_pnl,
+            profit_factor, expectancy,
+            avg_win_pnl, avg_loss_pnl,
+            signal_analysis, observations,
+            analysis_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        int(ov.get("total_trades", 0)),
+        n,
         float(ov.get("win_rate", 0.0)),
         float(ov.get("avg_net_pnl", 0.0)),
         float(ov.get("total_net_pnl", 0.0)),
         float(ov.get("avg_hold_hours", 0.0)),
+        period_label,
+        wins,
+        losses,
+        gross_pnl,
+        float(pf) if pf is not None else None,
+        float(exp),
+        float(ov.get("avg_win_pnl", 0.0)),
+        float(ov.get("avg_loss_pnl", 0.0)),
+        json.dumps(sig),
+        json.dumps(obs),
         json.dumps(analysis),
     ))
     conn.commit()
