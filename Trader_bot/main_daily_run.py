@@ -232,7 +232,7 @@ def score_all_candidates(feats_by_symbol):
                     "risk_score": risk_score,
                     "ref_price": ref,
                     "stop_price": round(ref * (1.0 - float(config.STOP_LOSS_PCT)), 2) if ref else 0.0,
-                    "take_price": round(ref * (1.0 + float(config.TAKE_PROFIT_PCT)), 2) if ref else 0.0,
+                    "take_price": round(ref * (1.0 + float(getattr(config, "CONDITIONAL_SELL_INITIAL_PCT", 0.50))), 2) if ref else 0.0,
                     "rationale": f"{setup_type} | {rationale}".strip(),
                 })
 

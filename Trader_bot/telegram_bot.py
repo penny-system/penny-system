@@ -276,7 +276,7 @@ def _fetch_watch_rec_by_symbol(run_id: int, symbol: str) -> dict | None:
     if stop <= 0 and ref > 0:
         stop = round(ref * (1.0 - float(config.STOP_LOSS_PCT)), 2)
     if take <= 0 and ref > 0:
-        take = round(ref * (1.0 + float(config.TAKE_PROFIT_PCT)), 2)
+        take = round(ref * (1.0 + float(getattr(config, "CONDITIONAL_SELL_INITIAL_PCT", 0.50))), 2)
     return {
         "symbol":        str(row[0]).upper(),
         "score_total":   float(row[1] or 0),
@@ -646,7 +646,7 @@ async def approve_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ <b>{symbol}</b> is on the WATCHLIST (not a formal BUY).\n"
             f"Score: {match['score_total']:.1f}  ·  Conf: {match['confidence']*100:.0f}%  ·  Risk: {match['risk_score']:.2f}\n\n"
             f"Entry: <b>${match['ref_price']:.2f}</b>  ·  Qty: <b>{match['suggested_qty']}</b> shares\n"
-            f"Stop: ${match['stop_price']:.2f}  ·  Take: ${match['take_price']:.2f}\n\n"
+            f"Stop: ${match['stop_price']:.2f}  ·  Target: ${match['take_price']:.2f} (cond. +50%)\n\n"
             f"Reply /confirm to proceed or /cancel to abort",
             parse_mode="HTML",
         )
@@ -655,7 +655,7 @@ async def approve_trade(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🕒 <b>Pending order — confirm before placing:</b>\n\n"
             f"📈 <b>{symbol}</b>\n"
             f"Entry: <b>${match['ref_price']:.2f}</b>  ·  Qty: <b>{match['suggested_qty']}</b> shares\n"
-            f"Stop: ${match['stop_price']:.2f}  ·  Take: ${match['take_price']:.2f}\n\n"
+            f"Stop: ${match['stop_price']:.2f}  ·  Target: ${match['take_price']:.2f} (cond. +50%)\n\n"
             f"Reply /confirm to place bracket order\n"
             f"Reply /cancel to discard",
             parse_mode="HTML",
