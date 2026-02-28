@@ -4,8 +4,8 @@ from __future__ import annotations
 import config
 from typing import Any, Dict, List, Optional
 
-from src_settings import apply_overrides_to_config
-from src_ibkr_client import get_effective_purse_usd
+from src_settings import apply_overrides_to_config, load_overrides
+from src_ibkr_client import get_effective_purse_usd, get_live_fx_rate
 
 
 def _get_max_positions() -> int:
@@ -39,6 +39,24 @@ def size_recommendations(
       - then it uses configured purse only (no IBKR cap)
     """
     apply_overrides_to_config(config)
+
+    # ── FX rate resolution ───────────────────────────────────────────────────
+    # Priority: manual override in runtime_overrides.json > live IBKR/API rate
+    # > config/hardcoded fallback.  Manual override wins when explicitly set.
+    _manual_fx = float(load_overrides().get("USD_PER_CAD", 0.0) or 0.0)
+    if _manual_fx > 0:
+        print(f"[FX] FX rate: 1 CAD = {_manual_fx:.4f} USD (source: manual override)")
+    elif ib is not None:
+        _live_fx, _fx_source = get_live_fx_rate(ib)
+        if _live_fx > 0:
+            config.USD_PER_CAD = _live_fx
+            print(f"[FX] FX rate: 1 CAD = {_live_fx:.4f} USD (source: {_fx_source})")
+        else:
+            _fb = float(getattr(config, "USD_PER_CAD", 0.73) or 0.73)
+            print(f"[FX] FX rate: 1 CAD = {_fb:.4f} USD (source: config fallback — live fetch failed)")
+    else:
+        _fb = float(getattr(config, "USD_PER_CAD", 0.73) or 0.73)
+        print(f"[FX] FX rate: 1 CAD = {_fb:.4f} USD (source: config fallback — no IBKR connection)")
 
     if not recs:
         return recs

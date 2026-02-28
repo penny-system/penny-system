@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import time
-from ib_insync import IB
+from ib_insync import IB, Forex
+import requests
 import config
 
 
@@ -93,6 +94,59 @@ def get_available_funds_usd(ib: IB) -> float:
                 return float(x)
 
     return 0.0
+
+
+def get_live_fx_rate(ib: IB) -> tuple[float, str]:
+    """
+    Fetch the live CAD/USD exchange rate.
+
+    Attempt 1: IBKR reqMktData on the USDCAD Forex pair.
+      USDCAD price = how many CAD per 1 USD (e.g. 1.37).
+      USD_PER_CAD  = 1 / USDCAD price             (e.g. 0.729).
+
+    Attempt 2: free open.er-api.com API (no key required).
+
+    Returns (usd_per_cad, source) on success.
+    Returns (0.0, "")           on complete failure.
+    """
+    # ── Attempt 1: IBKR forex ticker ──────────────────────────────────────────
+    try:
+        contract = Forex("USDCAD")
+        ticker = ib.reqMktData(contract, "", False, False)
+        ib.sleep(2)
+
+        raw = None
+        for candidate in [ticker.last, ticker.marketPrice(), ticker.close]:
+            try:
+                v = float(candidate)
+                if v == v and v > 0:   # v == v is False for NaN
+                    raw = v
+                    break
+            except Exception:
+                continue
+
+        ib.cancelMktData(contract)
+
+        if raw and raw > 0:
+            usd_per_cad = round(1.0 / raw, 6)
+            return usd_per_cad, "IBKR"
+    except Exception:
+        pass  # fall through to API fallback
+
+    # ── Attempt 2: free exchange rate API ─────────────────────────────────────
+    try:
+        resp = requests.get(
+            "https://open.er-api.com/v6/latest/CAD",
+            timeout=5,
+        )
+        data = resp.json()
+        rate = float(data["rates"]["USD"])
+        if rate > 0:
+            return round(rate, 6), "open.er-api.com"
+    except Exception:
+        pass
+
+    return 0.0, ""
 
 
 def get_effective_purse_usd(ib: IB) -> dict:
