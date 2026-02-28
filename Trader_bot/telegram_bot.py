@@ -349,6 +349,10 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/positions       View open IBKR positions\n"
         "/portfolio       Holdings with P&amp;L and daily change\n"
         "\n"
+        "📊 <b>Position Management</b>\n"
+        "/sell SYMBOL     Sell position (on conditional trigger)\n"
+        "/hold SYMBOL     Hold position, set new anchor\n"
+        "\n"
         "📈 <b>Analytics</b>\n"
         "/history [N]     Last N closed trades (default 20)\n"
         "/performance     Win rate, P&amp;L, key observations\n"
@@ -447,7 +451,6 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         symbol = _pending_trade["symbol"]
         qty    = _pending_trade["suggested_qty"]
         entry  = _pending_trade["ref_price"]
-        take   = _pending_trade["take_price"]
         stop   = _pending_trade["stop_price"]
 
         await update.message.reply_text(f"Connecting to IBKR and placing order for {symbol}…")
@@ -460,7 +463,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 ib = IB()
                 ib.connect(config.IB_HOST, config.IB_PORT, clientId=17)
-                result = place_bracket(ib, symbol, qty, entry, take, stop)
+                result = place_bracket(ib, symbol, qty, entry, stop)
                 ib.disconnect()
                 _fut.set_result(result)
             except Exception as _e:
@@ -477,7 +480,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"✅ Bracket order placed for <b>{symbol}</b>\n"
                 f"Entry: <b>${entry:.2f}</b>  ·  Qty: <b>{qty}</b> shares\n"
-                f"Stop: ${stop:.2f}  ·  Take: ${take:.2f}\n"
+                f"Stop: ${stop:.2f}  (take-profit via conditional sell monitor)\n"
                 f"Order ID: {result.get('parentId', 'n/a')}",
                 parse_mode="HTML",
             )
@@ -1286,6 +1289,165 @@ async def report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def sell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/sell SYMBOL — Exit position via conditional sell (cancels stop, places market sell)."""
+    if not _is_allowed(update):
+        await update.message.reply_text("⛔ Not authorized for this bot.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /sell SYMBOL")
+        return
+
+    symbol = args[0].upper()
+
+    # Verify symbol is in PENDING_DECISION state
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT status FROM conditional_sell_state WHERE symbol=?", (symbol,)
+        )
+        row = cur.fetchone()
+        conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"❌ DB error: {e}")
+        return
+
+    if not row or row[0] != "PENDING_DECISION":
+        await update.message.reply_text(
+            f"❌ No pending sell decision for {symbol}. Use /portfolio to check positions."
+        )
+        return
+
+    # Get qty from open_positions
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT fill_qty FROM open_positions"
+            " WHERE UPPER(TRIM(symbol))=? AND status='open'"
+            " ORDER BY position_id DESC LIMIT 1",
+            (symbol,)
+        )
+        qty_row = cur.fetchone()
+        conn.close()
+    except Exception as e:
+        await update.message.reply_text(f"❌ DB error fetching qty: {e}")
+        return
+
+    if not qty_row:
+        await update.message.reply_text(f"❌ No open position found for {symbol}.")
+        return
+
+    qty = int(qty_row[0])
+    await update.message.reply_text(
+        f"Connecting to IBKR — selling {qty} shares of {symbol}…"
+    )
+
+    _fut = concurrent.futures.Future()
+
+    def _sell():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            from src_trade_tracker import execute_conditional_sell
+            ib = IB()
+            ib.connect(config.IB_HOST, config.IB_PORT, clientId=17)
+            result = execute_conditional_sell(ib, symbol, qty)
+            ib.disconnect()
+            # Mark state as SOLD in DB
+            conn2 = sqlite3.connect(_DB_PATH)
+            cur2  = conn2.cursor()
+            cur2.execute(
+                "UPDATE conditional_sell_state SET status='SOLD' WHERE symbol=?",
+                (symbol,)
+            )
+            conn2.commit()
+            conn2.close()
+            _fut.set_result(result)
+        except Exception as _e:
+            _fut.set_exception(_e)
+        finally:
+            loop.close()
+
+    threading.Thread(target=_sell, daemon=True).start()
+
+    try:
+        result = await asyncio.wrap_future(_fut)
+        await update.message.reply_text(
+            f"✅ Sell order placed for <b>{symbol}</b>\n"
+            f"Qty: {qty} shares  ·  Order ID: {result.get('orderId', 'n/a')}\n"
+            f"Fill notification will follow.",
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Sell order failed for {symbol}: {e}\n\n"
+            f"Is TWS running with API enabled on port {config.IB_PORT}?"
+        )
+
+
+async def hold_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/hold SYMBOL — Keep position, reset anchor to trigger price."""
+    if not _is_allowed(update):
+        await update.message.reply_text("⛔ Not authorized for this bot.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text("Usage: /hold SYMBOL")
+        return
+
+    symbol = args[0].upper()
+
+    conn = None
+    try:
+        conn = sqlite3.connect(_DB_PATH)
+        cur  = conn.cursor()
+        cur.execute(
+            "SELECT status, last_trigger_price, entry_price"
+            " FROM conditional_sell_state WHERE symbol=?",
+            (symbol,)
+        )
+        row = cur.fetchone()
+    except Exception as e:
+        if conn:
+            conn.close()
+        await update.message.reply_text(f"❌ DB error: {e}")
+        return
+
+    if not row or row[0] != "PENDING_DECISION":
+        conn.close()
+        await update.message.reply_text(
+            f"❌ No pending sell decision for {symbol}."
+        )
+        return
+
+    # Use last_trigger_price (actual price at trigger time); fall back to entry
+    current_price = float(row[1] if row[1] is not None else row[2])
+
+    try:
+        from src_trade_tracker import handle_hold
+        result = handle_hold(conn, symbol, current_price)
+        conn.close()
+    except Exception as e:
+        conn.close()
+        await update.message.reply_text(f"❌ Hold update failed: {e}")
+        return
+
+    subsequent_pct = float(getattr(config, "CONDITIONAL_SELL_SUBSEQUENT_PCT", 0.30))
+
+    await update.message.reply_text(
+        f"✅ Holding <b>{symbol}</b>. New anchor: <b>${result['anchor']:.2f}</b>\n"
+        f"Next triggers:\n"
+        f"  📈 +{subsequent_pct*100:.0f}%: <b>${result['trigger_high']:.2f}</b>\n"
+        f"  📉 -{subsequent_pct*100:.0f}%: <b>${result['trigger_low']:.2f}</b>",
+        parse_mode="HTML",
+    )
+
+
 def main():
     token = getattr(config, "TELEGRAM_BOT_TOKEN", None)
     if not token or "PASTE_YOUR_BOT_TOKEN_HERE" in token:
@@ -1311,6 +1473,8 @@ def main():
     app.add_handler(CommandHandler("candidates", candidates))
     app.add_handler(CommandHandler("approve", approve_trade))
     app.add_handler(CommandHandler("skip", skip_trade))
+    app.add_handler(CommandHandler("sell", sell_handler))
+    app.add_handler(CommandHandler("hold", hold_handler))
     app.add_handler(CommandHandler("positions", positions_handler))
     app.add_handler(CommandHandler("portfolio", portfolio_handler))
     app.add_handler(CommandHandler("brief", brief_handler))

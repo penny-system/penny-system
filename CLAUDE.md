@@ -114,7 +114,8 @@ src_universe.py  →  src_features.py  →  src_scoring.py  →  src_sizing.py
 | `src_regime.py` | `compute_regime(ib)` | SPY + VXX-based regime: `risk_on | neutral | risk_off`. |
 | `src_settings.py` | `apply_overrides_to_config(config)` | Reads `runtime_overrides.json`, patches `config` module at runtime. Called at start of sizing. |
 | `src_briefing.py` | `write_brief()` | Legacy brief writer (richer format with portfolio). `main_daily_run.py` owns brief writing now. |
-| `src_trade_tracker.py` | `start_fill_monitor()`, `monitor_stop_loss(ib)`, `is_market_hours()` | Fill monitor (clientId 21): tracks IBKR `execDetailsEvent` + `commissionReportEvent` to record entries/exits in DB. Also hosts the stop-loss monitor with -10% warning and -15% alert. Started as background thread by `telegram_bot.py`. |
+| `src_trade_tracker.py` | `start_fill_monitor()`, `monitor_stop_loss(ib)`, `is_market_hours()`, `handle_hold(conn, symbol, price)`, `execute_conditional_sell(ib, symbol, qty)` | Fill monitor (clientId 21): tracks IBKR `execDetailsEvent` + `commissionReportEvent` to record entries/exits in DB. Also hosts the stop-loss monitor (-10% warning, -15% alert) and the conditional sell monitor (price polling every 60s). Started as background thread by `telegram_bot.py`. |
+| `src_conditional_sell.py` | `evaluate_stock_health(ib, conn, symbol, entry, current, direction)` | Stock health evaluation engine: 5-factor analysis (momentum, volume, risk, news, technical) → hold_score → SELL/HOLD recommendation + rationale. Called by the conditional sell monitor. |
 | `src_learning.py` | `run_learning_analysis(conn)`, `save_learning_snapshot(conn, analysis)` | 4-layer analytics engine: signal buckets, combination analysis, temporal trend, slippage analysis. Returns structured dict with profit_factor, expectancy, observations. |
 | `src_report.py` | `generate_report(conn)` | Dark-theme HTML performance report. Sections: overview stats, open positions, temporal, signal analysis, combinations, slippage, trade history (with key signals column). Saved to `output/reports/`. |
 | `approve.py` | — | Interactive CLI: shows BUY recs, accepts `APPROVE <SYM>` / `REJECT <SYM>` / `EXIT`. Places bracket orders (parent limit buy + take-profit limit + stop-loss stop). |
@@ -244,12 +245,42 @@ OPENAI_MODEL=gpt-4o-mini      # optional override
 
 ### Bracket order persistence (GTC)
 
-Bracket child orders (stop-loss and take-profit) are placed with `tif="GTC"` (Good Till Cancelled). This is critical — the IBKR default is `tif="DAY"`, which means child orders **expire at end of session**. A DAY stop-loss placed intraday will not protect a position held overnight or across multiple days.
+Brackets are now **2-leg** (BUY + stop-loss only). Take-profit is handled by the conditional sell monitor, not IBKR.
 
 - **Parent BUY order**: `tif="DAY"` (intentional — stale unfilled BUY orders should not linger)
 - **Stop-loss SELL stop**: `tif="GTC"` — persists across sessions until filled or manually cancelled
-- **Take-profit SELL limit**: `tif="GTC"` — same
 
-Child orders also share an `ocaGroup` (One Cancels All). When either fills, IBKR automatically cancels the other, preventing a double-exit or accidental short.
+**If TWS disconnects after bracket placement**: GTC orders persist on IBKR's servers and survive restarts. Use `/portfolio` in the Telegram bot to verify open positions after any TWS restart.
 
-**If TWS disconnects after bracket placement**: GTC orders placed via TWS API persist on IBKR's servers and survive restarts. The position remains protected as long as the original bracket was placed and confirmed. Use `/portfolio` in the Telegram bot to verify open positions and their associated orders after any TWS restart.
+---
+
+### Conditional Sell System
+
+Replaces the fixed 35% take-profit bracket. Bracket orders are now 2-leg (BUY + stop-loss only). Take-profit is handled by the conditional sell monitor running inside the FillMonitor thread.
+
+**Flow:**
+1. Position reaches +50% from entry → engine evaluates stock health
+2. Telegram notification: SELL CONDITIONAL with SELL/HOLD recommendation + factor breakdown
+3. User sends `/sell SYMBOL` or `/hold SYMBOL`
+4. If HOLD: new anchor set at current price, next triggers at ±30%
+5. Cycle repeats at each new anchor until `/sell` or stop-loss triggers
+
+**Key files:**
+- `src_conditional_sell.py` — stock health evaluation (momentum, volume, risk, news, technical)
+- `src_trade_tracker.py` — conditional sell monitor loop (shares clientId=21 FillMonitor connection)
+- `approve.py` — 2-leg bracket placement (no take-profit order)
+
+**DB table:** `conditional_sell_state` — tracks anchor prices, trigger thresholds, and status per symbol.
+
+**Config:**
+- `CONDITIONAL_SELL_INITIAL_PCT = 0.50` — first trigger at +50% from entry
+- `CONDITIONAL_SELL_SUBSEQUENT_PCT = 0.30` — subsequent triggers at ±30% from anchor
+- `CONDITIONAL_SELL_CHECK_INTERVAL = 60` — price poll interval in seconds
+- Stop-loss remains at `STOP_LOSS_PCT = 0.15` as IBKR bracket order (GTC)
+
+**Decision logic:** 5 factors scored to a `hold_score` (-12 to +8). `hold_score >= 2` → HOLD, otherwise SELL. Neutral zone (-1 to +1) defaults to SELL — when in doubt, take profits.
+
+**Edge cases:**
+- Stop-loss fills first → FillMonitor marks `conditional_sell_state.status = 'SOLD'`; monitor skips
+- PENDING_DECISION > 2 hours → single reminder sent; stop-loss still protects downside
+- IBKR disconnect → state in SQLite, survives restarts; monitor resumes on reconnect

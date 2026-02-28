@@ -153,28 +153,25 @@ def load_buy_recs(conn, run_id):
     return recs, cols, qty_col
 
 
-def place_bracket(ib, symbol, qty, entry, take, stop, dry_run: bool = False):
+def place_bracket(ib, symbol, qty, entry, stop, dry_run: bool = False):
     """
-    Places a 3-leg bracket order:
-      Parent:  BUY  Limit  (DAY — expires if not filled today)
-      Child 1: SELL Limit  take-profit  (GTC — survives past close)
-      Child 2: SELL Stop   stop-loss    (GTC — survives past close)
+    Places a 2-leg bracket order:
+      Parent: BUY  Limit  (DAY — expires if not filled today)
+      Child:  SELL Stop   stop-loss  (GTC — survives past close)
 
-    Children are linked via parentId AND an OCA group so IBKR cancels the
-    remaining child the moment either one fills.
-
-    tif='GTC' on children is critical: without it IBKR defaults to DAY and
-    the stop-loss expires at end of session, leaving the position unprotected.
+    Take-profit is handled by the conditional sell monitor, not IBKR.
+    tif='GTC' on the stop-loss is critical — without it IBKR defaults to
+    DAY and the stop expires at end of session, leaving the position unprotected.
     """
     if dry_run:
         print(
             f"[DRY-RUN] Bracket: {symbol}  qty={qty}"
-            f"  entry=${entry:.2f}  take=${take:.2f}  stop=${stop:.2f}"
+            f"  entry=${entry:.2f}  stop=${stop:.2f}"
         )
         return {"dry_run": True, "symbol": symbol, "qty": qty,
-                "entry": entry, "take": take, "stop": stop}
+                "entry": entry, "stop": stop}
 
-    print(f"[ORDER] {symbol}: qty={qty}  entry=${entry:.2f}  take=${take:.2f}  stop=${stop:.2f}")
+    print(f"[ORDER] {symbol}: qty={qty}  entry=${entry:.2f}  stop=${stop:.2f}")
 
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)
@@ -191,33 +188,22 @@ def place_bracket(ib, symbol, qty, entry, take, stop, dry_run: bool = False):
             "Check TWS permissions / paper account settings."
         )
 
-    # OCA group ties the two children: when one fills, IBKR cancels the other
-    oca_group = f"BKT_{symbol}_{parent_id}"
-
-    # --- Build children now that parent_id is confirmed ---
-    take_o = LimitOrder(
-        "SELL", qty, round(take, 2),
-        parentId=parent_id, transmit=False,
-        tif="GTC", ocaGroup=oca_group, ocaType=1,
-    )
+    # --- Stop-loss is the only child — transmit=True triggers the full bracket ---
     stop_o = StopOrder(
         "SELL", qty, round(stop, 2),
-        parentId=parent_id, transmit=True,   # True on final child → triggers full bracket
-        tif="GTC", ocaGroup=oca_group, ocaType=1,
+        parentId=parent_id, transmit=True,
+        tif="GTC",
     )
 
-    ib.placeOrder(contract, take_o)
     ib.placeOrder(contract, stop_o)
-    ib.sleep(2)  # allow all three orders to reach and be acknowledged by TWS
+    ib.sleep(2)  # allow both orders to reach and be acknowledged by TWS
 
-    # --- Verify all child orders are visible in IBKR open orders ---
+    # --- Verify stop order is visible in IBKR open orders ---
     open_orders = ib.reqOpenOrders()
     ib.sleep(0.5)
     submitted_ids = {o.orderId for o in open_orders}
 
     missing = []
-    if take_o.orderId not in submitted_ids:
-        missing.append(f"take-profit (orderId={take_o.orderId}, ${take:.2f})")
     if stop_o.orderId not in submitted_ids:
         missing.append(f"stop-loss (orderId={stop_o.orderId}, ${stop:.2f})")
 
@@ -233,9 +219,7 @@ def place_bracket(ib, symbol, qty, entry, take, stop, dry_run: bool = False):
         "parentId": parent_id,
         "qty": qty,
         "entry": entry,
-        "take": take,
         "stop": stop,
-        "oca_group": oca_group,
         "verified": len(missing) == 0,
     }
 
@@ -263,7 +247,7 @@ def main():
         print(
             f"{r['symbol']} | score={r['score_total']:.1f} "
             f"conf={r['confidence']:.2f} risk={r['risk_score']:.1f} "
-            f"ref={r['ref_price']:.2f} stop={r['stop_price']:.2f} take={r['take_price']:.2f} "
+            f"ref={r['ref_price']:.2f} stop={r['stop_price']:.2f} target={r['take_price']:.2f} "
             f"qty={r['suggested_qty']}"
         )
 
@@ -327,7 +311,6 @@ def main():
             symbol,
             qty,
             match["ref_price"],
-            match["take_price"],
             match["stop_price"],
             dry_run=args.dry_run
         )

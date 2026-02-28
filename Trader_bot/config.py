@@ -109,9 +109,22 @@ AUTO_POSITION_SIZING = True
 # BRACKET PARAMETERS
 # ============================
 
-# % expressed as decimals: 0.15 = 15%, 0.35 = 35%
+# % expressed as decimals: 0.15 = 15%
 STOP_LOSS_PCT = 0.15
-TAKE_PROFIT_PCT = 0.35
+
+
+# ============================
+# CONDITIONAL SELL SYSTEM
+# ============================
+
+# First trigger: position gains this % from entry price
+CONDITIONAL_SELL_INITIAL_PCT = 0.50      # +50% from entry
+
+# After HOLD: re-trigger when price moves this % from the new anchor
+CONDITIONAL_SELL_SUBSEQUENT_PCT = 0.30   # ±30% from last anchor
+
+# Price check interval (seconds) during market hours
+CONDITIONAL_SELL_CHECK_INTERVAL = 60     # every 60 seconds
 
 
 # ============================

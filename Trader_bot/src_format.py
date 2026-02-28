@@ -105,7 +105,7 @@ def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False,
 
     lines.extend([
         f"Score <b>{score:.1f}</b>  ·  Conf {conf*100:.0f}%  ·  Risk {risk:.2f}",
-        f"Ref <b>${refp:.2f}</b>  ·  Stop ${stop:.2f}  ·  Take ${take:.2f}",
+        f"Ref <b>${refp:.2f}</b>  ·  Stop ${stop:.2f}  ·  Target ${take:.2f} (cond. +50%)",
         f"Qty: {qty} shares",
     ])
 

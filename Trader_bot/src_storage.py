@@ -215,6 +215,27 @@ def ensure_schema(conn: sqlite3.Connection):
         if col not in ls_cols:
             cur.execute(f"ALTER TABLE learning_snapshots ADD COLUMN {col} {defn}")
 
+    # ---------------------------------------------------------------------------
+    # conditional_sell_state — per-symbol anchor prices and trigger thresholds
+    # ---------------------------------------------------------------------------
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS conditional_sell_state (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        symbol             TEXT    NOT NULL UNIQUE,
+        entry_price        REAL    NOT NULL,
+        anchor_price       REAL    NOT NULL,
+        trigger_high       REAL    NOT NULL,
+        trigger_low        REAL,
+        trigger_count      INTEGER DEFAULT 0,
+        status             TEXT    DEFAULT 'WATCHING',
+        last_trigger_at    TEXT,
+        last_trigger_price REAL,
+        last_direction     TEXT,
+        reminder_sent_at   TEXT,
+        created_at         TEXT    NOT NULL
+    )
+    """)
+
     conn.commit()
 
 

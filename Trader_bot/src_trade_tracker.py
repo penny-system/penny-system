@@ -298,6 +298,349 @@ def monitor_stop_loss(ib, conn=None, drawdown_threshold: float = None) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Conditional sell monitor — module-level helpers
+# ---------------------------------------------------------------------------
+
+def _signal_emoji(signal: str) -> str:
+    mapping = {
+        "bullish":   "🟢", "strong":   "🟢", "low_risk": "🟢", "positive": "🟢",
+        "neutral":   "⚪", "normal":   "⚪", "no_news":  "⚪",
+        "bearish":   "🔴", "fading":   "🔴", "high_risk":"🔴", "negative": "🔴",
+        "elevated":  "🟡", "weakening":"🟡", "broken":   "🔴",
+    }
+    return mapping.get(signal.lower(), "⚪")
+
+
+def _send_conditional_sell_notification(sym: str, entry_price: float,
+                                        current_price: float, direction: str,
+                                        trigger_count: int, evaluation: dict,
+                                        subsequent_pct: float):
+    """Format and send the SELL CONDITIONAL Telegram notification."""
+    rec       = evaluation.get("recommendation", "SELL")
+    conf      = float(evaluation.get("confidence", 0.50))
+    rationale = evaluation.get("rationale", "")
+    factors   = evaluation.get("factors", {})
+
+    gain_pct   = (current_price - entry_price) / entry_price * 100
+    gain_sign  = "+" if gain_pct >= 0 else ""
+    gain_emoji = "📈" if gain_pct >= 0 else "📉"
+
+    trigger_label     = "first trigger" if trigger_count == 1 else f"trigger #{trigger_count}"
+    trigger_pct_label = (
+        "50% from entry" if trigger_count == 1
+        else f"±{subsequent_pct*100:.0f}% from anchor"
+    )
+
+    rec_emoji = "🟢" if rec == "HOLD" else "🔴"
+
+    # Next triggers if user HOLDs
+    next_high = current_price * (1 + subsequent_pct)
+    next_low  = current_price * (1 - subsequent_pct)
+
+    # Health check block
+    factor_lines = ""
+    label_map = {
+        "momentum":  "Momentum ",
+        "volume":    "Volume   ",
+        "risk":      "Risk     ",
+        "news":      "News     ",
+        "technical": "Technical",
+    }
+    for key, label in label_map.items():
+        f      = factors.get(key, {})
+        sig    = f.get("signal", "unknown")
+        detail = f.get("detail", "")
+        emoji  = _signal_emoji(sig)
+        factor_lines += f"  {label}: {emoji} {sig.upper()} ({detail})\n"
+
+    msg = (
+        f"🔔 SELL CONDITIONAL — {sym}\n\n"
+        f"{gain_emoji} Entry: ${entry_price:.2f} → Current: ${current_price:.2f}"
+        f" ({gain_sign}{gain_pct:.1f}%)\n"
+        f"Trigger: {trigger_pct_label} ({trigger_label})\n\n"
+        f"🔬 Health Check:\n{factor_lines}\n"
+        f"💡 Recommendation: {rec_emoji} {rec} (confidence: {conf*100:.0f}%)\n"
+        f'"{rationale}"\n\n'
+        f"Next triggers if HOLD: ${next_high:.2f} (+{subsequent_pct*100:.0f}%)"
+        f" / ${next_low:.2f} (-{subsequent_pct*100:.0f}%)\n\n"
+        f"Reply:\n"
+        f"  /sell {sym} — Exit position now\n"
+        f"  /hold {sym} — Keep position, set new anchor at ${current_price:.2f}"
+    )
+
+    _send_telegram(msg)
+    _tracker_log(f"[COND_SELL] Notification sent for {sym}: {rec} ({conf*100:.0f}%)")
+
+
+def _maybe_send_reminder(conn, state: dict, sym: str, current_price: float):
+    """Send a one-time 2-hour reminder if still PENDING_DECISION."""
+    if state.get("reminder_sent_at"):
+        return  # already sent
+
+    last_trigger_at = state.get("last_trigger_at")
+    if not last_trigger_at:
+        return
+    try:
+        trigger_dt = datetime.fromisoformat(last_trigger_at).replace(tzinfo=None)
+        elapsed    = (datetime.utcnow() - trigger_dt).total_seconds()
+    except Exception:
+        return
+
+    if elapsed < 7200:  # less than 2 hours
+        return
+
+    now_str = datetime.utcnow().isoformat() + "+00:00"
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE conditional_sell_state SET reminder_sent_at=? WHERE symbol=?",
+        (now_str, sym)
+    )
+    conn.commit()
+
+    _send_telegram(
+        f"⏰ Reminder: SELL CONDITIONAL for {sym} is still pending.\n"
+        f"Current price: ${current_price:.2f}\n"
+        f"Reply /sell {sym} or /hold {sym}"
+    )
+    _tracker_log(f"[COND_SELL] 2-hour reminder sent for {sym}")
+
+
+def _run_conditional_sell_check(ib, conn):
+    """
+    Poll all open positions against conditional sell thresholds.
+    Called every CONDITIONAL_SELL_CHECK_INTERVAL seconds during market hours
+    from within the FillMonitor loop (shares clientId=21 connection).
+    """
+    from src_conditional_sell import evaluate_stock_health
+
+    initial_pct    = float(getattr(config, "CONDITIONAL_SELL_INITIAL_PCT",    0.50))
+    subsequent_pct = float(getattr(config, "CONDITIONAL_SELL_SUBSEQUENT_PCT", 0.30))
+
+    positions = get_open_positions_all(conn)
+    if not positions:
+        return
+
+    # Clean up state rows for symbols that are no longer open
+    open_symbols = {p["symbol"].upper() for p in positions}
+    cur = conn.cursor()
+    cur.execute("SELECT symbol FROM conditional_sell_state")
+    state_symbols = {row[0].upper() for row in cur.fetchall()}
+    for sym in state_symbols - open_symbols:
+        cur.execute("DELETE FROM conditional_sell_state WHERE symbol=?", (sym,))
+        _tracker_log(f"[COND_SELL] Cleaned up stale state for {sym}")
+    if state_symbols - open_symbols:
+        conn.commit()
+
+    for pos in positions:
+        sym         = pos["symbol"].upper()
+        entry_price = float(pos.get("fill_price") or 0)
+        qty         = int(pos.get("fill_qty") or 0)
+
+        if entry_price <= 0:
+            continue
+
+        # Fetch current price via the shared ib connection
+        try:
+            from ib_insync import Stock
+            contract = Stock(sym, "SMART", "USD")
+            ib.qualifyContracts(contract)
+            ticker = ib.reqMktData(contract, "", False, False)
+            ib.sleep(2)
+            current_price = _best_price(ticker)
+            ib.cancelMktData(contract)
+        except Exception as e:
+            _tracker_log(f"[COND_SELL] Price fetch failed for {sym}: {e}")
+            continue
+
+        if current_price <= 0:
+            continue
+
+        # Get or create state row
+        cur.execute("""
+            SELECT id, symbol, entry_price, anchor_price, trigger_high, trigger_low,
+                   trigger_count, status, last_trigger_at, last_trigger_price,
+                   last_direction, reminder_sent_at, created_at
+            FROM conditional_sell_state WHERE symbol=?
+        """, (sym,))
+        row = cur.fetchone()
+
+        if row is None:
+            # First time — initialise state
+            initial_trigger = entry_price * (1 + initial_pct)
+            now_str = datetime.utcnow().isoformat() + "+00:00"
+            cur.execute("""
+                INSERT INTO conditional_sell_state
+                (symbol, entry_price, anchor_price, trigger_high, trigger_low,
+                 trigger_count, status, created_at)
+                VALUES (?, ?, ?, ?, NULL, 0, 'WATCHING', ?)
+            """, (sym, entry_price, initial_trigger, initial_trigger, now_str))
+            conn.commit()
+            _tracker_log(
+                f"[COND_SELL] {sym}: watching, first trigger at"
+                f" ${initial_trigger:.2f} (+{initial_pct*100:.0f}%)"
+            )
+            # Re-fetch to populate state dict
+            cur.execute("""
+                SELECT id, symbol, entry_price, anchor_price, trigger_high, trigger_low,
+                       trigger_count, status, last_trigger_at, last_trigger_price,
+                       last_direction, reminder_sent_at, created_at
+                FROM conditional_sell_state WHERE symbol=?
+            """, (sym,))
+            row = cur.fetchone()
+
+        if row is None:
+            continue
+
+        state = {
+            "id": row[0], "symbol": row[1], "entry_price": row[2],
+            "anchor_price": row[3], "trigger_high": row[4], "trigger_low": row[5],
+            "trigger_count": row[6], "status": row[7], "last_trigger_at": row[8],
+            "last_trigger_price": row[9], "last_direction": row[10],
+            "reminder_sent_at": row[11], "created_at": row[12],
+        }
+
+        status        = state["status"]
+        trigger_count = int(state["trigger_count"] or 0)
+        trigger_high  = float(state["trigger_high"] or 0)
+        trigger_low   = state["trigger_low"]
+        trigger_low   = float(trigger_low) if trigger_low is not None else None
+
+        if status == "SOLD":
+            continue
+
+        if status == "PENDING_DECISION":
+            _maybe_send_reminder(conn, state, sym, current_price)
+            continue
+
+        # status == 'WATCHING' — check thresholds
+        triggered = False
+        direction = None
+
+        if trigger_count == 0:
+            # First trigger: only check upward (+50%)
+            if current_price >= trigger_high:
+                triggered, direction = True, "UP"
+        else:
+            # Subsequent triggers: check both directions
+            if current_price >= trigger_high:
+                triggered, direction = True, "UP"
+            elif trigger_low is not None and current_price <= trigger_low:
+                triggered, direction = True, "DOWN"
+
+        if not triggered:
+            continue
+
+        _tracker_log(
+            f"[COND_SELL] {sym}: threshold hit!"
+            f" price=${current_price:.2f} direction={direction}"
+        )
+
+        now_str = datetime.utcnow().isoformat() + "+00:00"
+
+        # Run health evaluation
+        try:
+            evaluation = evaluate_stock_health(ib, conn, sym, entry_price, current_price, direction)
+        except Exception as e:
+            _tracker_log(f"[COND_SELL] Health evaluation failed for {sym}: {e}")
+            evaluation = {
+                "recommendation": "SELL",
+                "confidence":     0.50,
+                "rationale":      "Health evaluation unavailable. Recommend reviewing manually.",
+                "factors":        {},
+            }
+
+        # Update state to PENDING_DECISION
+        cur.execute("""
+            UPDATE conditional_sell_state
+            SET status='PENDING_DECISION', last_trigger_at=?, last_trigger_price=?,
+                last_direction=?, trigger_count=trigger_count+1
+            WHERE symbol=?
+        """, (now_str, current_price, direction, sym))
+        conn.commit()
+
+        # Fire notification
+        _send_conditional_sell_notification(
+            sym, entry_price, current_price, direction,
+            trigger_count + 1, evaluation, subsequent_pct
+        )
+
+
+def handle_hold(conn, symbol: str, current_price: float) -> dict:
+    """
+    Called when the user sends /hold SYMBOL.
+
+    Sets new anchor to current_price and calculates next ±SUBSEQUENT_PCT triggers.
+    Resets status to 'WATCHING' and clears reminder_sent_at.
+    """
+    symbol         = symbol.upper()
+    subsequent_pct = float(getattr(config, "CONDITIONAL_SELL_SUBSEQUENT_PCT", 0.30))
+
+    anchor   = current_price
+    new_high = round(anchor * (1 + subsequent_pct), 4)
+    new_low  = round(anchor * (1 - subsequent_pct), 4)
+
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE conditional_sell_state
+        SET anchor_price=?, trigger_high=?, trigger_low=?,
+            status='WATCHING', reminder_sent_at=NULL
+        WHERE symbol=?
+    """, (anchor, new_high, new_low, symbol))
+    conn.commit()
+
+    _tracker_log(
+        f"[COND_SELL] {symbol} HOLD at ${anchor:.2f}."
+        f" Next triggers: ${new_high:.2f} / ${new_low:.2f}"
+    )
+    return {"anchor": anchor, "trigger_high": new_high, "trigger_low": new_low}
+
+
+def execute_conditional_sell(ib, symbol: str, qty: int) -> dict:
+    """
+    Execute a conditional sell: cancel existing stop-loss orders, then place a market sell.
+    Called from the /sell Telegram handler (clientId=17, non-readonly connection).
+    """
+    from ib_insync import Stock, MarketOrder
+
+    symbol   = symbol.upper()
+    contract = Stock(symbol, "SMART", "USD")
+    try:
+        ib.qualifyContracts(contract)
+    except Exception as e:
+        raise RuntimeError(f"Contract qualification failed for {symbol}: {e}")
+
+    # Cancel any open stop-loss orders for this symbol
+    try:
+        open_orders = ib.reqOpenOrders()
+        ib.sleep(1)
+        cancelled = []
+        for trade in open_orders:
+            o = trade.order    if hasattr(trade, "order")    else trade
+            c = trade.contract if hasattr(trade, "contract") else None
+            if (c and c.symbol.upper() == symbol
+                    and o.action.upper() == "SELL"
+                    and o.orderType.upper() in ("STP", "STOP")):
+                ib.cancelOrder(o)
+                cancelled.append(o.orderId)
+        if cancelled:
+            ib.sleep(1)
+            _tracker_log(f"[COND_SELL] Cancelled stop orders for {symbol}: {cancelled}")
+    except Exception as e:
+        _tracker_log(f"[COND_SELL] Warning: could not cancel stop orders for {symbol}: {e}")
+
+    # Place market sell
+    sell_order = MarketOrder("SELL", qty)
+    ib.placeOrder(contract, sell_order)
+    ib.sleep(1)
+
+    _tracker_log(
+        f"[COND_SELL] Market sell placed for {symbol}"
+        f" qty={qty} orderId={sell_order.orderId}"
+    )
+    return {"orderId": sell_order.orderId, "symbol": symbol, "qty": qty}
+
+
+# ---------------------------------------------------------------------------
 # FillMonitor — background thread watching for IBKR fills
 # ---------------------------------------------------------------------------
 
@@ -357,8 +700,10 @@ class FillMonitor:
         ib.execDetailsEvent      += self._on_exec_details
         ib.commissionReportEvent += self._on_commission_report
 
-        interval_secs  = int(getattr(config, "RECONCILIATION_INTERVAL_MINUTES", 5)) * 60
-        last_reconcile = 0.0
+        interval_secs      = int(getattr(config, "RECONCILIATION_INTERVAL_MINUTES", 5)) * 60
+        cond_sell_interval = int(getattr(config, "CONDITIONAL_SELL_CHECK_INTERVAL", 60))
+        last_reconcile     = 0.0
+        last_cond_sell     = 0.0
 
         while not self._stop_event.is_set():
             try:
@@ -377,8 +722,9 @@ class FillMonitor:
                 except Exception as e:
                     _tracker_log(f"Fill processing error: {e}")
 
-            # Periodic reconciliation
             now = time.monotonic()
+
+            # Periodic reconciliation
             if now - last_reconcile >= interval_secs:
                 if is_market_hours():
                     try:
@@ -386,6 +732,18 @@ class FillMonitor:
                     except Exception as e:
                         _tracker_log(f"Reconciliation error: {e}")
                 last_reconcile = now
+
+            # Conditional sell monitor (shares clientId=21 connection)
+            if now - last_cond_sell >= cond_sell_interval:
+                if is_market_hours():
+                    try:
+                        conn = connect_db()
+                        ensure_schema(conn)
+                        _run_conditional_sell_check(ib, conn)
+                        conn.close()
+                    except Exception as e:
+                        _tracker_log(f"Conditional sell check error: {e}")
+                last_cond_sell = now
 
         try:
             ib.disconnect()
@@ -578,6 +936,19 @@ class FillMonitor:
                     f"net=${net_pnl:+.2f} ({outcome}) reason={exit_reason}"
                 )
                 _warned_symbols.discard(sym)   # clear warning memory on close
+
+                # Mark conditional sell state as SOLD so monitor skips this symbol
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "UPDATE conditional_sell_state SET status='SOLD'"
+                        " WHERE symbol=? AND status != 'SOLD'",
+                        (sym,)
+                    )
+                    conn.commit()
+                except Exception:
+                    pass
+
                 self._send_exit_notification(sym, trade_id, {
                     "entry_price": entry_price,
                     "exit_price":  fill_price,
