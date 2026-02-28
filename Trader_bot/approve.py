@@ -1,9 +1,27 @@
 import argparse
 import os
 import sqlite3
+import urllib.parse
+import urllib.request
 import config
 from src_ibkr_client import connect_ib
 from ib_insync import Stock, LimitOrder, StopOrder
+
+
+def _send_telegram_alert(msg: str):
+    """Send an urgent Telegram message. Fail-silent — never crash the order flow."""
+    token = getattr(config, "TELEGRAM_BOT_TOKEN", None) or os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = getattr(config, "TELEGRAM_CHAT_ID", None) or os.environ.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = urllib.parse.urlencode({"chat_id": str(chat_id), "text": msg}).encode("utf-8")
+        urllib.request.urlopen(
+            urllib.request.Request(url, data=data, method="POST"), timeout=10
+        )
+    except Exception as e:
+        print(f"[WARN] Telegram alert failed: {e}")
 
 
 def db_connect(db_path: str | None = None):
@@ -137,36 +155,89 @@ def load_buy_recs(conn, run_id):
 
 def place_bracket(ib, symbol, qty, entry, take, stop, dry_run: bool = False):
     """
-    Places a bracket order:
-      Parent: BUY Limit
-      Child 1: SELL Limit (take profit)
-      Child 2: SELL Stop  (stop loss) [transmit=True]
+    Places a 3-leg bracket order:
+      Parent:  BUY  Limit  (DAY — expires if not filled today)
+      Child 1: SELL Limit  take-profit  (GTC — survives past close)
+      Child 2: SELL Stop   stop-loss    (GTC — survives past close)
+
+    Children are linked via parentId AND an OCA group so IBKR cancels the
+    remaining child the moment either one fills.
+
+    tif='GTC' on children is critical: without it IBKR defaults to DAY and
+    the stop-loss expires at end of session, leaving the position unprotected.
     """
     if dry_run:
-        return {"dry_run": True, "symbol": symbol, "qty": qty, "entry": entry, "take": take, "stop": stop}
+        print(
+            f"[DRY-RUN] Bracket: {symbol}  qty={qty}"
+            f"  entry=${entry:.2f}  take=${take:.2f}  stop=${stop:.2f}"
+        )
+        return {"dry_run": True, "symbol": symbol, "qty": qty,
+                "entry": entry, "take": take, "stop": stop}
+
+    print(f"[ORDER] {symbol}: qty={qty}  entry=${entry:.2f}  take=${take:.2f}  stop=${stop:.2f}")
 
     contract = Stock(symbol, "SMART", "USD")
     ib.qualifyContracts(contract)
 
+    # --- Place parent first to obtain its orderId ---
     parent = LimitOrder("BUY", qty, round(entry, 2), transmit=False)
-    take_o = LimitOrder("SELL", qty, round(take, 2), parentId=0, transmit=False)
-    stop_o = StopOrder("SELL", qty, round(stop, 2), parentId=0, transmit=True)
-
     ib.placeOrder(contract, parent)
-    ib.sleep(0.5)
+    ib.sleep(1)  # allow orderId to be assigned and acknowledged
 
     parent_id = parent.orderId
     if not parent_id:
-        raise RuntimeError("Parent orderId not assigned. Check TWS permissions/paper account.")
+        raise RuntimeError(
+            "Parent orderId not assigned after placement. "
+            "Check TWS permissions / paper account settings."
+        )
 
-    take_o.parentId = parent_id
-    stop_o.parentId = parent_id
+    # OCA group ties the two children: when one fills, IBKR cancels the other
+    oca_group = f"BKT_{symbol}_{parent_id}"
+
+    # --- Build children now that parent_id is confirmed ---
+    take_o = LimitOrder(
+        "SELL", qty, round(take, 2),
+        parentId=parent_id, transmit=False,
+        tif="GTC", ocaGroup=oca_group, ocaType=1,
+    )
+    stop_o = StopOrder(
+        "SELL", qty, round(stop, 2),
+        parentId=parent_id, transmit=True,   # True on final child → triggers full bracket
+        tif="GTC", ocaGroup=oca_group, ocaType=1,
+    )
 
     ib.placeOrder(contract, take_o)
     ib.placeOrder(contract, stop_o)
-    ib.sleep(1)  # flush child orders to TWS before caller disconnects
+    ib.sleep(2)  # allow all three orders to reach and be acknowledged by TWS
 
-    return {"parentId": parent_id, "qty": qty, "entry": entry, "take": take, "stop": stop}
+    # --- Verify all child orders are visible in IBKR open orders ---
+    open_orders = ib.reqOpenOrders()
+    ib.sleep(0.5)
+    submitted_ids = {o.orderId for o in open_orders}
+
+    missing = []
+    if take_o.orderId not in submitted_ids:
+        missing.append(f"take-profit (orderId={take_o.orderId}, ${take:.2f})")
+    if stop_o.orderId not in submitted_ids:
+        missing.append(f"stop-loss (orderId={stop_o.orderId}, ${stop:.2f})")
+
+    if missing:
+        alert = (
+            f"⚠️ WARNING: Bracket order for {symbol} may be incomplete. "
+            f"Missing: {', '.join(missing)}. Check IBKR immediately."
+        )
+        print(f"[WARN] {alert}")
+        _send_telegram_alert(alert)
+
+    return {
+        "parentId": parent_id,
+        "qty": qty,
+        "entry": entry,
+        "take": take,
+        "stop": stop,
+        "oca_group": oca_group,
+        "verified": len(missing) == 0,
+    }
 
 
 def main():

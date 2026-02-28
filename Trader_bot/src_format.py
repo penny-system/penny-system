@@ -61,7 +61,8 @@ def _clean_rationale(raw: str) -> str:
     return ". ".join(parts) if parts else ""
 
 
-def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False, emoji: str = "📈") -> str:
+def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False,
+                  news_risk_note: str = None, emoji: str = "✅") -> str:
     """
     Format a single BUY candidate as an HTML block.
 
@@ -69,8 +70,9 @@ def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False, e
             take_price, suggested_qty, rationale (opt), gate_decision (opt),
             gate_confidence (opt), gate_reason (opt)
 
-    gate_note: pre-formatted gate string (overrides gate_* fields in r).
-    has_news_risk: show ⚠️ flag next to symbol.
+    gate_note:      pre-formatted gate string (overrides gate_* fields in r).
+    has_news_risk:  show ⚠️ flag next to symbol.
+    news_risk_note: one-line explanation of which risk keywords triggered the flag.
     """
     sym   = str(r.get("symbol", "")).upper()
     score = float(r.get("score_total", 0) or 0)
@@ -92,18 +94,20 @@ def fmt_candidate(r: dict, gate_note: str = None, has_news_risk: bool = False, e
         if gd:
             pct = f" ({gc*100:.0f}%)" if gc else ""
             reason = f" — {gr[:80]}" if gr else ""
-            _gate_line = f"🛡 Gate: <b>{gd}</b>{pct}{reason}"
+            _gate_line = f"⚠️ Gate: <b>{gd}</b>{pct}{reason}"
         else:
             _gate_line = ""
 
-    risk_flag = "  ⚠️" if (has_news_risk or _gate_line) else ""
+    lines = [f"{emoji} <b>{sym}</b>"]
 
-    lines = [
-        f"{emoji} <b>{sym}</b>{risk_flag}",
+    if news_risk_note:
+        lines.append(f"<i>{news_risk_note}</i>")
+
+    lines.extend([
         f"Score <b>{score:.1f}</b>  ·  Conf {conf*100:.0f}%  ·  Risk {risk:.2f}",
         f"Ref <b>${refp:.2f}</b>  ·  Stop ${stop:.2f}  ·  Take ${take:.2f}",
         f"Qty: {qty} shares",
-    ]
+    ])
 
     if _gate_line:
         lines.append(_gate_line)
@@ -153,7 +157,7 @@ def fmt_brief_message(buy_recs: list[dict], watch_recs: list[dict],
 
     if buy_recs:
         lines.append("")
-        lines.append(f"🎆 <b>{len(buy_recs)} BUY Candidate{'s' if len(buy_recs) != 1 else ''}</b>")
+        lines.append(f"📊 <b>{len(buy_recs)} BUY Candidate{'s' if len(buy_recs) != 1 else ''}</b>")
         for r in buy_recs:
             lines.append("")
             lines.append(DIVIDER)
@@ -191,7 +195,7 @@ def fmt_buy_message(recs: list[dict], purse: float, max_positions: int,
     count = len(recs)
 
     lines = [
-        f"🎆 <b>{count} BUY Candidate{'s' if count != 1 else ''} — {_fmt_date()}</b>",
+        f"📊 <b>{count} BUY Candidate{'s' if count != 1 else ''} — {_fmt_date()}</b>",
         f"💰 Purse: ${purse:,.0f} | Invested: ${invested:,.0f} | Available: ${max(0, purse - invested):,.0f}",
         f"📊 Positions: {active_positions}/{max_positions} active",
     ]

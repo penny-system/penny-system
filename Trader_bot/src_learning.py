@@ -535,6 +535,202 @@ def _generate_observations(analysis: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Layer 5: Per-trade signal cards with auto-commentary
+# ---------------------------------------------------------------------------
+
+def _generate_trade_commentary(t: dict) -> tuple[list[str], list[str]]:
+    """
+    Inspect a single trade's snapshot values and return (positives, warnings).
+    All thresholds align with src_risk.py and src_scoring.py logic.
+    """
+    outcome  = (t.get("outcome") or "").upper()
+    score    = float(t.get("score_total") or 0)
+    conf     = float(t.get("confidence") or 0)
+    risk     = float(t.get("risk_score") or 0)
+    vol      = float(t.get("vol_surge") or 0)
+    brk      = int(t.get("breakout") or 0)
+    gate     = (t.get("gate_decision") or "").upper()
+    sec_a    = int(t.get("sec_trigger_a") or 0)
+    sec_hits = int(t.get("sec_hits") or 0)
+
+    positives: list[str] = []
+    warnings:  list[str] = []
+
+    # Confidence
+    if conf >= 0.80:
+        positives.append(f"High confidence ({conf:.2f}) — signal well above BUY threshold")
+    elif conf >= 0.70:
+        positives.append(f"Solid confidence ({conf:.2f})")
+    elif 0 < conf < 0.65:
+        warnings.append(f"Low confidence ({conf:.2f}) — borderline BUY near decision threshold")
+
+    # Risk score
+    if 0 < risk < 0.20:
+        positives.append(f"Low risk score ({risk:.2f}) — favourable risk profile")
+    elif risk < 0.30:
+        positives.append(f"Moderate risk ({risk:.2f})")
+    elif risk >= 0.35:
+        warnings.append(
+            f"Elevated risk score ({risk:.2f}) — position sizing should have been reduced"
+        )
+
+    # Breakout
+    if brk == 1:
+        positives.append("Breakout confirmed — price cleared recent resistance structure")
+    else:
+        warnings.append("No breakout confirmation — vol surge alone drove the entry signal")
+
+    # Gate decision
+    if gate == "APPROVE":
+        positives.append("AI gate: APPROVE — no conflicting news risk at entry")
+    elif gate in ("HOLD", "REDUCE"):
+        warnings.append(
+            f"AI gate flagged {gate} — trade was executed against the gate signal"
+        )
+    elif gate == "BLOCK":
+        warnings.append(
+            "AI gate flagged BLOCK — strongest caution signal; entry overrode it"
+        )
+
+    # Vol surge
+    if 2.0 <= vol <= 5.0:
+        positives.append(f"Healthy vol surge ({vol:.1f}x) — meaningful but not excessive")
+    elif vol > 5.0:
+        warnings.append(
+            f"Extreme vol surge ({vol:.1f}x) — heightened pump/dump risk at these levels"
+        )
+    elif 0 < vol < 1.5:
+        warnings.append(f"Low vol surge ({vol:.1f}x) — weak conviction signal")
+
+    # Score
+    if score >= 90:
+        positives.append(f"Strong composite score ({score:.1f}) — multiple pillars aligned")
+
+    # SEC news
+    if sec_a == 1 or sec_hits >= 2:
+        warnings.append(
+            "SEC EDGAR filings flagged at entry — dilution/warrant risk was present"
+        )
+
+    # For losses with no detected warnings, add a catch-all note
+    if outcome == "LOSS" and not warnings:
+        warnings.append(
+            f"No clear parameter warnings — score {score:.1f}, conf {conf:.2f}, "
+            f"risk {risk:.2f} all within normal range. Likely a market or timing "
+            f"factor outside the model's current scope."
+        )
+
+    return positives, warnings
+
+
+def _trade_signal_cards(trades: list[dict]) -> list[dict]:
+    """
+    Build a per-trade card dict (newest first, max 25) with signal values
+    and auto-generated commentary for the HTML report.
+    """
+    cards = []
+    for t in trades:
+        positives, warnings = _generate_trade_commentary(t)
+
+        net_pnl   = float(t.get("net_pnl") or 0)
+        entry_p   = float(t.get("entry_price") or 0)
+        exit_p    = float(t.get("exit_price") or 0)
+        qty       = int(t.get("entry_qty") or 0)
+        trade_val = entry_p * qty
+        pnl_pct   = (net_pnl / trade_val * 100) if trade_val else 0.0
+        hold_s    = int(t.get("hold_seconds") or 0)
+
+        cards.append({
+            "symbol":      t.get("symbol", "?"),
+            "closed_at":   (t.get("closed_at") or "")[:10],
+            "outcome":     (t.get("outcome") or "").upper(),
+            "net_pnl":     net_pnl,
+            "pnl_pct":     pnl_pct,
+            "hold_seconds": hold_s,
+            "score":       float(t.get("score_total") or 0),
+            "confidence":  float(t.get("confidence") or 0),
+            "risk":        float(t.get("risk_score") or 0),
+            "vol_surge":   float(t.get("vol_surge") or 0),
+            "breakout":    int(t.get("breakout") or 0),
+            "ret_5":       float(t.get("ret_5") or 0),
+            "setup_type":  t.get("setup_type") or "",
+            "gate":        (t.get("gate_decision") or "").upper(),
+            "entry_price": entry_p,
+            "exit_price":  exit_p,
+            "entry_qty":   qty,
+            "exit_reason": t.get("exit_reason") or "",
+            "gross_pnl":   float(t.get("gross_pnl") or 0),
+            "commission":  float(t.get("commission_total") or 0),
+            "positives":   positives,
+            "warnings":    warnings,
+        })
+
+    # Newest first, cap at 25
+    cards.sort(key=lambda c: c["closed_at"], reverse=True)
+    return cards[:25]
+
+
+# ---------------------------------------------------------------------------
+# Layer 6: Pillar correlation analysis
+# ---------------------------------------------------------------------------
+
+def _pillar_correlation(trades: list[dict]) -> list[dict]:
+    """
+    For each key scoring pillar, compute win/loss stats per threshold bucket.
+    Returns a flat list of rows: {pillar, label, n, wins, losses, win_rate, avg_pnl}.
+    """
+    def _stats(subset: list[dict]) -> dict | None:
+        n = len(subset)
+        if n == 0:
+            return None
+        wins    = sum(1 for t in subset if (t.get("outcome") or "") == "WIN")
+        losses  = sum(1 for t in subset if (t.get("outcome") or "") == "LOSS")
+        avg_pnl = _safe_div(sum(float(t.get("net_pnl") or 0) for t in subset), n)
+        return {"n": n, "wins": wins, "losses": losses,
+                "win_rate": _safe_div(wins, n), "avg_pnl": avg_pnl}
+
+    pillars = [
+        ("Confidence", [
+            ("≥ 0.80  (high)",      lambda t: (t.get("confidence") or 0) >= 0.80),
+            ("0.70 – 0.79  (solid)",lambda t: 0.70 <= (t.get("confidence") or 0) < 0.80),
+            ("< 0.70  (low)",       lambda t: 0 < (t.get("confidence") or 0) < 0.70),
+        ]),
+        ("Risk Score", [
+            ("< 0.20  (low)",       lambda t: 0 < (t.get("risk_score") or 0) < 0.20),
+            ("0.20 – 0.34  (mod)",  lambda t: 0.20 <= (t.get("risk_score") or 0) < 0.35),
+            ("≥ 0.35  (high)",      lambda t: (t.get("risk_score") or 0) >= 0.35),
+        ]),
+        ("Breakout", [
+            ("Yes  (breakout = 1)", lambda t: int(t.get("breakout") or 0) == 1),
+            ("No   (breakout = 0)", lambda t: int(t.get("breakout") or 0) == 0),
+        ]),
+        ("Gate Decision", [
+            ("APPROVE",             lambda t: (t.get("gate_decision") or "") == "APPROVE"),
+            ("HOLD / BLOCK",        lambda t: (t.get("gate_decision") or "") in ("HOLD","BLOCK","REDUCE")),
+        ]),
+        ("Vol Surge", [
+            ("< 3x",                lambda t: 0 < (t.get("vol_surge") or 0) < 3.0),
+            ("3 – 5x",              lambda t: 3.0 <= (t.get("vol_surge") or 0) < 5.0),
+            ("> 5x",                lambda t: (t.get("vol_surge") or 0) >= 5.0),
+        ]),
+        ("Score", [
+            ("≥ 90",                lambda t: (t.get("score_total") or 0) >= 90.0),
+            ("85 – 89",             lambda t: 85.0 <= (t.get("score_total") or 0) < 90.0),
+            ("80 – 84",             lambda t: 80.0 <= (t.get("score_total") or 0) < 85.0),
+        ]),
+    ]
+
+    rows = []
+    for pillar_name, buckets in pillars:
+        for label, pred in buckets:
+            subset = [t for t in trades if pred(t)]
+            st = _stats(subset)
+            if st:
+                rows.append({"pillar": pillar_name, "label": label, **st})
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -551,14 +747,18 @@ def run_learning_analysis(conn: sqlite3.Connection) -> dict:
     combos   = _combination_analysis(trades)
     temporal = _temporal_analysis(trades)
     slippage = _slippage_analysis(trades)
+    cards    = _trade_signal_cards(trades)
+    pillars  = _pillar_correlation(trades)
 
     analysis = {
-        "overview":      overview,
-        "signals":       signals,
-        "combinations":  combos,
-        "temporal":      temporal,
-        "slippage":      slippage,
-        "generated_at":  datetime.utcnow().isoformat() + "+00:00",
+        "overview":           overview,
+        "signals":            signals,
+        "combinations":       combos,
+        "temporal":           temporal,
+        "slippage":           slippage,
+        "trade_cards":        cards,
+        "pillar_correlation": pillars,
+        "generated_at":       datetime.utcnow().isoformat() + "+00:00",
     }
     analysis["observations"] = _generate_observations(analysis)
     return analysis

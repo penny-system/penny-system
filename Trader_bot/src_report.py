@@ -49,6 +49,43 @@ tr:nth-child(even) { background:#161b22; }
 .tag-reliable    { color:#3fb950; font-size:0.75em; }
 .footer { margin-top:40px; border-top:1px solid #30363d; padding-top:12px;
           color:#484f58; font-size:0.8em; }
+
+/* --- Pillar correlation table --- */
+.pillar-section { margin-top:8px; }
+.pillar-label   { color:#8b949e; font-size:0.8em; text-transform:uppercase;
+                  letter-spacing:0.05em; padding:14px 10px 4px; }
+
+/* --- Trade cards --- */
+.trade-card { border:1px solid #30363d; border-radius:8px; margin:16px 0;
+              overflow:hidden; }
+.card-hdr   { display:flex; justify-content:space-between; align-items:center;
+              padding:10px 16px; font-weight:bold; }
+.card-hdr-win  { background:#0d2818; border-bottom:3px solid #3fb950; }
+.card-hdr-loss { background:#2d1010; border-bottom:3px solid #f85149; }
+.card-hdr-even { background:#1f1c0a; border-bottom:3px solid #d29922; }
+.card-sym  { font-size:1.1em; }
+.card-pnl  { font-size:1.0em; }
+.card-body { padding:14px 16px; }
+.card-metrics { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:12px; }
+.cm-box    { background:#0d1117; border:1px solid #30363d; border-radius:5px;
+             padding:8px 14px; min-width:80px; text-align:center; }
+.cm-val    { font-size:1.15em; font-weight:bold; }
+.cm-lbl    { font-size:0.73em; color:#8b949e; margin-top:3px; }
+.cm-green  { color:#3fb950; }
+.cm-yellow { color:#d29922; }
+.cm-red    { color:#f85149; }
+.card-tags { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; font-size:0.82em; }
+.tag       { border-radius:12px; padding:3px 10px; border:1px solid #30363d; color:#8b949e; }
+.tag-good  { border-color:#3fb950; color:#3fb950; }
+.tag-warn  { border-color:#d29922; color:#d29922; }
+.tag-bad   { border-color:#f85149; color:#f85149; }
+.card-meta { font-size:0.82em; color:#8b949e; margin-bottom:12px; }
+.card-commentary { border-radius:4px; padding:10px 14px; font-size:0.88em;
+                   line-height:1.55; margin-top:4px; }
+.comm-win  { background:#0d2818; border-left:3px solid #3fb950; }
+.comm-loss { background:#2d1010; border-left:3px solid #f85149; }
+.comm-list { margin:0; padding:0 0 0 18px; }
+.comm-list li { margin:3px 0; }
 """
 
 
@@ -377,22 +414,214 @@ def _section_trade_history(conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Pillar correlation section
+# ---------------------------------------------------------------------------
+
+def _section_pillar_correlation(rows: list[dict]) -> str:
+    if not rows:
+        return (
+            "<h2>Pillar Correlation Analysis</h2>"
+            "<p>Insufficient data — need at least 5 closed trades.</p>"
+        )
+
+    current_pillar = None
+    html = "<h2>Pillar Correlation Analysis</h2>\n"
+    html += (
+        "<p style='color:#8b949e;font-size:0.88em;'>Win rate and average P&L "
+        "broken down by each scoring parameter at the time of entry. "
+        "Use this to identify which thresholds predict success or flag risk.</p>\n"
+    )
+
+    for r in rows:
+        pillar = r["pillar"]
+        if pillar != current_pillar:
+            if current_pillar is not None:
+                html += "</table>\n"
+            html += f'<p class="pillar-label">{pillar}</p>\n'
+            html += (
+                "<table><tr>"
+                "<th>Threshold</th><th>N</th><th>W</th><th>L</th>"
+                "<th>Win Rate</th><th>Avg Net P&L</th>"
+                "</tr>\n"
+            )
+            current_pillar = pillar
+
+        wr  = r["win_rate"]
+        if wr >= 0.65:
+            wr_cls = "win"
+        elif wr <= 0.40:
+            wr_cls = "loss"
+        else:
+            wr_cls = "even"
+
+        pnl = r["avg_pnl"]
+        pnl_s = _fmt_pnl(pnl)
+        pnl_cls = "win" if pnl >= 0 else "loss"
+
+        html += (
+            f"<tr>"
+            f"<td>{r['label']}</td>"
+            f"<td>{r['n']}</td>"
+            f"<td class='win'>{r['wins']}</td>"
+            f"<td class='loss'>{r['losses']}</td>"
+            f"<td class='{wr_cls}'><strong>{wr*100:.0f}%</strong></td>"
+            f"<td class='{pnl_cls}'>{pnl_s}</td>"
+            f"</tr>\n"
+        )
+
+    html += "</table>\n"
+    return html
+
+
+# ---------------------------------------------------------------------------
+# Trade signal cards section
+# ---------------------------------------------------------------------------
+
+def _section_trade_cards(cards: list[dict]) -> str:
+    if not cards:
+        return ""
+
+    def _hold(s: int) -> str:
+        if s >= 3600:
+            h, m = divmod(s, 3600)
+            return f"{h}h {m//60}m"
+        return f"{s // 60}m"
+
+    def _score_cls(val: float, low_good: bool = False) -> str:
+        """Return colour class. low_good=True for risk score (lower = better)."""
+        if low_good:
+            return "cm-green" if val < 0.20 else ("cm-yellow" if val < 0.35 else "cm-red")
+        return "cm-green" if val >= 0.80 else ("cm-yellow" if val >= 0.70 else "cm-red")
+
+    def _vol_tag_cls(vol: float) -> str:
+        return "tag-good" if 2.0 <= vol <= 5.0 else ("tag-warn" if vol > 5.0 else "tag")
+
+    def _gate_cls(gate: str) -> str:
+        return "tag-good" if gate == "APPROVE" else "tag-bad"
+
+    html = f"<h2>Trade Signal Cards (last {len(cards)})</h2>\n"
+    html += (
+        "<p style='color:#8b949e;font-size:0.88em;'>Per-trade breakdown of "
+        "score / confidence / risk at entry, with auto-generated analysis "
+        "of what worked or what the warning signs were.</p>\n"
+    )
+
+    for c in cards:
+        outcome   = c["outcome"]
+        net_pnl   = c["net_pnl"]
+        pnl_pct   = c["pnl_pct"]
+        hdr_cls   = {"WIN": "card-hdr-win", "LOSS": "card-hdr-loss"}.get(outcome, "card-hdr-even")
+        badge     = {"WIN": "✅ WIN", "LOSS": "🔴 LOSS"}.get(outcome, "⚪ BREAKEVEN")
+        pnl_sign  = "+" if net_pnl >= 0 else ""
+        pct_sign  = "+" if pnl_pct >= 0 else ""
+
+        # Score box — higher is better
+        sc_val = c["score"]
+        sc_cls = "cm-green" if sc_val >= 88 else ("cm-yellow" if sc_val >= 83 else "cm-red")
+
+        # Confidence box
+        cf_cls = _score_cls(c["confidence"])
+
+        # Risk box (lower = better)
+        rk_cls = _score_cls(c["risk"], low_good=True)
+
+        # Tags
+        brk_tag = (
+            '<span class="tag tag-good">breakout ✓</span>'
+            if c["breakout"] == 1
+            else '<span class="tag tag-warn">no breakout</span>'
+        )
+        vol_cls = _vol_tag_cls(c["vol_surge"])
+        vol_tag = f'<span class="tag {vol_cls}">vol {c["vol_surge"]:.1f}x</span>'
+
+        gate = c["gate"]
+        gt_cls  = _gate_cls(gate)
+        gate_tag = f'<span class="tag {gt_cls}">gate: {gate or "—"}</span>' if gate else ""
+
+        setup_tag = (
+            f'<span class="tag">{c["setup_type"]}</span>' if c["setup_type"] else ""
+        )
+        ret5_pct = c["ret_5"] * 100
+        ret5_tag = f'<span class="tag">5d ret: {ret5_pct:+.1f}%</span>'
+
+        # Commentary
+        positives = c["positives"]
+        warnings  = c["warnings"]
+        comm_cls  = "comm-win" if outcome == "WIN" else "comm-loss"
+
+        pos_html = ""
+        if positives:
+            items = "".join(f"<li>{p}</li>" for p in positives)
+            pos_html = (
+                f'<div style="margin-bottom:6px;color:#3fb950;font-size:0.85em;">'
+                f'<strong>Success factors:</strong>'
+                f'<ul class="comm-list">{items}</ul></div>'
+            )
+
+        warn_html = ""
+        if warnings:
+            items = "".join(f"<li>{w}</li>" for w in warnings)
+            warn_html = (
+                f'<div style="color:#f85149;font-size:0.85em;">'
+                f'<strong>{"Warning signs" if outcome == "LOSS" else "Caution flags"}:</strong>'
+                f'<ul class="comm-list">{items}</ul></div>'
+            )
+
+        html += f"""
+<div class="trade-card">
+  <div class="card-hdr {hdr_cls}">
+    <span class="card-sym">{badge} &nbsp; <strong>{c['symbol']}</strong></span>
+    <span class="card-pnl">{pnl_sign}${net_pnl:.2f} ({pct_sign}{pnl_pct:.1f}%) &nbsp; {c['closed_at']}</span>
+  </div>
+  <div class="card-body">
+    <div class="card-metrics">
+      <div class="cm-box"><div class="cm-val {sc_cls}">{sc_val:.1f}</div><div class="cm-lbl">Score</div></div>
+      <div class="cm-box"><div class="cm-val {cf_cls}">{c['confidence']:.2f}</div><div class="cm-lbl">Confidence</div></div>
+      <div class="cm-box"><div class="cm-val {rk_cls}">{c['risk']:.2f}</div><div class="cm-lbl">Risk</div></div>
+      <div class="cm-box"><div class="cm-val">${c['entry_price']:.4f}</div><div class="cm-lbl">Entry</div></div>
+      <div class="cm-box"><div class="cm-val">${c['exit_price']:.4f}</div><div class="cm-lbl">Exit</div></div>
+      <div class="cm-box"><div class="cm-val">{c['entry_qty']}</div><div class="cm-lbl">Qty</div></div>
+    </div>
+    <div class="card-tags">
+      {brk_tag}{vol_tag}{ret5_tag}{gate_tag}{setup_tag}
+    </div>
+    <div class="card-meta">
+      Exit: {c['exit_reason'].replace('_',' ')} &nbsp;|&nbsp;
+      Hold: {_hold(c['hold_seconds'])} &nbsp;|&nbsp;
+      Gross: {_fmt_pnl(c['gross_pnl'])} &nbsp;|&nbsp;
+      Fees: ${c['commission']:.2f} &nbsp;|&nbsp;
+      Net: {_fmt_pnl(net_pnl)}
+    </div>
+    <div class="card-commentary {comm_cls}">
+      {pos_html}{warn_html}
+    </div>
+  </div>
+</div>"""
+
+    return html
+
+
+# ---------------------------------------------------------------------------
 # Main builder
 # ---------------------------------------------------------------------------
 
 def _build_html(analysis: dict, conn: sqlite3.Connection) -> str:
-    ov   = analysis.get("overview", {})
-    obs  = analysis.get("observations", [])
-    te   = analysis.get("temporal", {})
-    sig  = analysis.get("signals", {})
-    cm   = analysis.get("combinations", {})
-    sl   = analysis.get("slippage", {})
-    gen  = analysis.get("generated_at", "")
+    ov      = analysis.get("overview", {})
+    obs     = analysis.get("observations", [])
+    te      = analysis.get("temporal", {})
+    sig     = analysis.get("signals", {})
+    cm      = analysis.get("combinations", {})
+    sl      = analysis.get("slippage", {})
+    cards   = analysis.get("trade_cards", [])
+    pillars = analysis.get("pillar_correlation", [])
+    gen     = analysis.get("generated_at", "")
 
     body = (
         _section_overview(ov)
         + _section_observations(obs)
         + _section_open_positions(conn)
+        + _section_pillar_correlation(pillars)
+        + _section_trade_cards(cards)
         + _section_temporal(te)
         + _section_signals(sig)
         + _section_combinations(cm)
