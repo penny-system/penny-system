@@ -107,9 +107,9 @@ src_universe.py  →  src_features.py  →  src_scoring.py  →  src_sizing.py
 | `src_universe.py` | `load_static_universe()` | Loads symbols from `scan_*.csv` (first column); falls back to `universe_static.txt` |
 | `src_features.py` | `compute_features_from_bars(bars)` | Computes `ref_price`, `ret_1`, `ret_5`, `vol_surge`, `dollar_vol`, `breakout` from 1-min IBKR bars |
 | `src_scoring.py` | `score_candidate(feat, horizon)` | Returns `(score, confidence, setup_type, rationale)`. Score ≥80 = BUY. Score is hard-capped at 74.9 if the setup is "unconfirmed". |
-| `src_sizing.py` | `size_recommendations(recs, ib=None)` | Risk-weighted position allocation: lower `risk_score` → larger allocation. Applies `runtime_overrides.json` before sizing. |
+| `src_sizing.py` | `size_recommendations(recs, ib=None)` | Tier-based position allocation (HIGH/MED/LOW) with no position cap. Remaining purse = configured purse minus deployed capital from `open_positions` DB. Candidates processed highest-score-first. |
 | `src_storage.py` | `connect_db()`, `ensure_schema()`, `create_run()`, `insert_recommendations()`, `snapshot_recommendations()`, `insert_open_position()`, `close_position()` | All SQLite I/O. Schema adds columns via ALTER IF MISSING. |
-| `src_ibkr_client.py` | `connect_ib()`, `get_effective_purse_usd(ib)` | IBKR connection (TWS paper: port 7497, clientId 12). Effective purse = `min(configured, IBKR available funds)`. |
+| `src_ibkr_client.py` | `connect_ib()`, `get_live_fx_rate(ib)` | IBKR connection (TWS paper: port 7497, clientId 12). Also fetches live FX rate for CAD→USD conversion. |
 | `src_news.py` | `fetch_and_analyze_news(symbol)` | Marketaux API news fetch + keyword scoring. `news_summary_for_contract(ib, contract)` uses IBKR historical headlines as fallback. |
 | `src_regime.py` | `compute_regime(ib)` | SPY + VXX-based regime: `risk_on | neutral | risk_off`. |
 | `src_settings.py` | `apply_overrides_to_config(config)` | Reads `runtime_overrides.json`, patches `config` module at runtime. Called at start of sizing. |
@@ -120,13 +120,29 @@ src_universe.py  →  src_features.py  →  src_scoring.py  →  src_sizing.py
 | `src_report.py` | `generate_report(conn)` | Dark-theme HTML performance report. Sections: overview stats, open positions, temporal, signal analysis, combinations, slippage, trade history (with key signals column). Saved to `output/reports/`. |
 | `approve.py` | — | Interactive CLI: shows BUY recs, accepts `APPROVE <SYM>` / `REJECT <SYM>` / `EXIT`. Places bracket orders (parent limit buy + take-profit limit + stop-loss stop). |
 | `notify_scan.py` | — | Orchestrates the full scan, then sends Telegram notifications. Morning mode always sends; hourly mode deduplicates on signature. Calls `backfill_snapshot_gate()` after OpenAI gate decisions. |
-| `telegram_bot.py` | — | Telegram bot: runtime control (`/purse`, `/maxpos`, `/fx`, `/minpos`), trade analytics (`/history`, `/performance`, `/report`), IBKR position views (`/portfolio`, `/positions`). Starts fill monitor on launch. |
+| `telegram_bot.py` | — | Telegram bot: runtime control (`/purse`, `/fx`, `/minpos`), trade analytics (`/history`, `/performance`, `/report`), IBKR position views (`/portfolio`, `/positions`). Starts fill monitor on launch. `/maxpos` removed. |
 
 ### Scoring Logic
 
 - **Confirmation required for BUY**: A stock is only scoreable above 74.9 if `breakout==1 AND vol_surge>=1.20` OR `dollar_vol >= $25M`.
 - **Horizons**: `swing` (uses `ret_5`) and `momentum` (uses `ret_1`). Both are scored per symbol.
 - **Decision threshold**: `score_total >= 80` → `"BUY"`, else `"WATCH"`.
+
+### Sizing Logic (`src_sizing.py`)
+
+There is **no maximum position cap**. Every BUY candidate gets sized. The purse is the only constraint.
+
+**Remaining purse** = configured purse (`TRADE_PURSE_CAD × USD_PER_CAD`, or `TRADE_PURSE_USD`) minus capital already deployed, queried live from `open_positions` DB (`SUM(fill_price * fill_qty) WHERE status='open'`). IBKR available funds are not used to cap the purse.
+
+**Tier classification** — all three criteria must be met (strict AND logic):
+
+| Tier | score_total | confidence | risk_score |
+|---|---|---|---|
+| HIGH | ≥ 87 | ≥ 0.75 | ≤ 0.35 |
+| MED  | ≥ 83 | ≥ 0.60 | ≤ 0.50 |
+| LOW  | fallback | — | — |
+
+**Allocation**: candidates sorted highest-score-first. Each gets `tier_pct × remaining_purse` (first-come, first-served — remaining budget shrinks as candidates are allocated). Default percentages: HIGH=25%, MED=18%, LOW=12%. All thresholds and percentages are tunable via `ALLOC_TIER_*` constants in `config.py`. `MIN_POSITION_USD` and `MAX_POSITION_USD` floor/ceiling still apply per position.
 
 ### News / AI Triggers
 
@@ -137,9 +153,9 @@ src_universe.py  →  src_features.py  →  src_scoring.py  →  src_sizing.py
 ### Runtime Overrides
 
 `runtime_overrides.json` overrides these config keys at runtime (without restarting):
-- `TRADE_PURSE_CAD`, `USD_PER_CAD`, `MAX_POSITIONS`, `MIN_POSITION_USD`
+- `TRADE_PURSE_CAD`, `USD_PER_CAD`, `MIN_POSITION_USD`
 
-The Telegram bot (`/purse`, `/maxpos`, `/fx`, `/minpos`) writes to this file via a pending → confirm flow.
+`MAX_POSITIONS` has been removed — there is no position cap. The Telegram bot (`/purse`, `/fx`, `/minpos`) writes to this file via a pending → confirm flow.
 
 ### Database Schema
 
