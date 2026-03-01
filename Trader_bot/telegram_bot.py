@@ -11,11 +11,11 @@ from datetime import datetime
 
 _BOT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _BOT_DIR)
-_DB_PATH = os.path.join(_BOT_DIR, "output", "trader.sqlite")
 _BRIEF_PATH = os.path.join(_BOT_DIR, "output", "brief.txt")
 _APPROVED_TRADES_PATH = os.path.join(_BOT_DIR, "output", "approved_trades.json")
 
 import config
+_DB_PATH = os.path.join(_BOT_DIR, getattr(config, "DB_PATH", "output/trader.sqlite"))
 from approve import place_bracket, load_buy_recs, latest_run_id as _latest_run_id
 from ib_insync import IB
 from src_format import fmt_buy_message, fmt_brief_message, fmt_watch_candidate, fmt_candidate, DIVIDER, _fmt_date
