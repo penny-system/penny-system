@@ -33,7 +33,6 @@ MAX_ITEMS_IN_MESSAGE = 8
 FAILURE_SILENCE_HOURS = 24
 
 PURSE = float(getattr(config, "PURSE", None) or getattr(config, "TRADE_PURSE_USD", 0) or 0)
-MAX_POSITIONS = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -307,14 +306,13 @@ def main():
 
     # --- MODE: morning (always send one structured message) ---
     if mode == "morning":
-        # Apply runtime overrides so purse/max_positions reflect actual settings
+        # Apply runtime overrides so purse reflects actual settings
         apply_overrides_to_config(config)
         purse_cad = float(getattr(config, "TRADE_PURSE_CAD", 0) or 0)
         if purse_cad > 0:
             purse_val = purse_cad
         else:
             purse_val = float(getattr(config, "TRADE_PURSE_USD", 1500.0) or 1500.0)
-        max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
         # Split candidates: already-owned symbols go to add-to-position section
         owned = set() if dry_run else get_owned_symbols()
@@ -323,7 +321,7 @@ def main():
 
         lines = []
         lines.append(f"📊 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
-        lines.append(f"💰 Purse: ${purse_val:,.0f}  |  Max: {max_pos}")
+        lines.append(f"💰 Purse: ${purse_val:,.0f}")
 
         state = load_state()
         trigger_a_new = []
@@ -468,11 +466,10 @@ def main():
     apply_overrides_to_config(config)
     purse_cad = float(getattr(config, "TRADE_PURSE_CAD", 0) or 0)
     purse_val = purse_cad if purse_cad > 0 else float(getattr(config, "TRADE_PURSE_USD", 1500.0) or 1500.0)
-    max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
     lines = []
     lines.append(f"📊 <b>{len(new_recs)} BUY Candidate{'s' if len(new_recs) != 1 else ''} — {_fmt_date()}</b>")
-    lines.append(f"💰 Purse: ${purse_val:,.0f}  |  Max: {max_pos}")
+    lines.append(f"💰 Purse: ${purse_val:,.0f}")
     lines.append("")
 
     trigger_a_new = []

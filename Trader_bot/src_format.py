@@ -144,7 +144,7 @@ def fmt_watch_candidate(r: dict) -> str:
 
 
 def fmt_brief_message(buy_recs: list[dict], watch_recs: list[dict],
-                      purse: float, max_positions: int,
+                      purse: float,
                       active_positions: int = 0, invested: float = 0) -> str:
     """
     Build the complete /brief HTML message: BUY candidates + WATCHLIST.
@@ -152,7 +152,7 @@ def fmt_brief_message(buy_recs: list[dict], watch_recs: list[dict],
     lines = [
         f"📋 <b>Brief — {_fmt_date()}</b>",
         f"💰 Purse: ${purse:,.0f} | Invested: ${invested:,.0f} | Available: ${max(0, purse - invested):,.0f}",
-        f"📊 Positions: {active_positions}/{max_positions} active",
+        f"📊 Open positions: {active_positions}",
     ]
 
     if buy_recs:
@@ -181,7 +181,7 @@ def fmt_brief_message(buy_recs: list[dict], watch_recs: list[dict],
     return "\n".join(lines)
 
 
-def fmt_buy_message(recs: list[dict], purse: float, max_positions: int,
+def fmt_buy_message(recs: list[dict], purse: float,
                     gate_notes: dict = None, news_risk_syms: set = None,
                     active_positions: int = 0, invested: float = 0) -> str:
     """
@@ -197,7 +197,7 @@ def fmt_buy_message(recs: list[dict], purse: float, max_positions: int,
     lines = [
         f"📊 <b>{count} BUY Candidate{'s' if count != 1 else ''} — {_fmt_date()}</b>",
         f"💰 Purse: ${purse:,.0f} | Invested: ${invested:,.0f} | Available: ${max(0, purse - invested):,.0f}",
-        f"📊 Positions: {active_positions}/{max_positions} active",
+        f"📊 Open positions: {active_positions}",
     ]
 
     for r in recs:

@@ -21,12 +21,46 @@ def db_path_resolve(db_path: str | None) -> str:
     return path
 
 
-def calc_suggested_qty(ref_price: float, purse: float, max_positions: int) -> int:
-    # Simple stable sizing to unblock workflow:
-    # qty = floor((purse / max_positions) / ref_price)
-    if ref_price <= 0 or purse <= 0 or max_positions <= 0:
+def _classify_tier(score: float, confidence: float, risk_score: float) -> str:
+    """Classify a recommendation into HIGH / MED / LOW allocation tier."""
+    high_score = float(getattr(config, "ALLOC_TIER_HIGH_MIN_SCORE", 87.0))
+    high_conf  = float(getattr(config, "ALLOC_TIER_HIGH_MIN_CONF",  0.75))
+    high_risk  = float(getattr(config, "ALLOC_TIER_HIGH_MAX_RISK",  0.35))
+
+    med_score  = float(getattr(config, "ALLOC_TIER_MED_MIN_SCORE", 83.0))
+    med_conf   = float(getattr(config, "ALLOC_TIER_MED_MIN_CONF",  0.60))
+    med_risk   = float(getattr(config, "ALLOC_TIER_MED_MAX_RISK",  0.50))
+
+    if score >= high_score and confidence >= high_conf and risk_score <= high_risk:
+        return "HIGH"
+    if score >= med_score and confidence >= med_conf and risk_score <= med_risk:
+        return "MED"
+    return "LOW"
+
+
+def _get_tier_pct(tier: str) -> float:
+    pcts = {
+        "HIGH": float(getattr(config, "ALLOC_TIER_HIGH_PCT", 0.25)),
+        "MED":  float(getattr(config, "ALLOC_TIER_MED_PCT",  0.18)),
+        "LOW":  float(getattr(config, "ALLOC_TIER_LOW_PCT",  0.12)),
+    }
+    return pcts.get(tier, pcts["LOW"])
+
+
+def calc_suggested_qty(ref_price: float, purse: float,
+                       score: float, confidence: float, risk_score: float) -> int:
+    """
+    Tier-based qty: each position gets its tier % of the configured purse.
+    This is a backfill approximation — does not subtract currently deployed capital.
+    """
+    if ref_price <= 0 or purse <= 0:
         return 0
-    position_budget = purse / max_positions
+    tier = _classify_tier(score, confidence, risk_score)
+    tier_pct = _get_tier_pct(tier)
+    position_budget = tier_pct * purse
+    min_pos = float(getattr(config, "MIN_POSITION_USD", 0.0))
+    max_pos = float(getattr(config, "MAX_POSITION_USD", 10**12))
+    position_budget = max(min_pos, min(position_budget, max_pos))
     return max(0, int(math.floor(position_budget / ref_price)))
 
 
@@ -38,8 +72,12 @@ def main():
     parser.add_argument("--overwrite", action="store_true", help="Overwrite even if suggested_qty already > 0")
     args = parser.parse_args()
 
-    purse = float(getattr(config, "PURSE", 0) or 0)
-    max_pos = int(getattr(config, "MAX_POSITIONS", 0) or 0)
+    purse_cad = float(getattr(config, "TRADE_PURSE_CAD", 0) or 0)
+    if purse_cad > 0:
+        fx = float(getattr(config, "USD_PER_CAD", 0.73) or 0.73)
+        purse = purse_cad * fx
+    else:
+        purse = float(getattr(config, "PURSE", 0) or getattr(config, "TRADE_PURSE_USD", 0) or 0)
 
     db_path = db_path_resolve(args.db_path)
     con = sqlite3.connect(db_path)
@@ -48,7 +86,6 @@ def main():
 
     # Determine run_id
     if args.run_id is None:
-        # Prefer runs.id if it exists; otherwise max(rowid)
         try:
             cur.execute("SELECT MAX(id) FROM runs")
             run_id = int(cur.fetchone()[0] or 0)
@@ -68,7 +105,6 @@ def main():
     params = [run_id]
 
     if args.only_buy:
-        # robust match: BUY, Buy, BUY␠ etc.
         where.append("UPPER(TRIM(decision)) = 'BUY'")
 
     if not args.overwrite:
@@ -76,9 +112,11 @@ def main():
 
     where_sql = " AND ".join(where)
 
-    # IMPORTANT: alias rowid so sqlite3.Row has a named key
     select_sql = f"""
-        SELECT rowid AS rid, symbol, ref_price, suggested_qty
+        SELECT rowid AS rid, symbol, ref_price, suggested_qty,
+               COALESCE(score_total, 80.0) AS score_total,
+               COALESCE(confidence, 0.5)   AS confidence,
+               COALESCE(risk_score, 0.5)   AS risk_score
         FROM recommendations
         WHERE {where_sql}
     """
@@ -87,19 +125,24 @@ def main():
 
     print(f"Using DB: {db_path}")
     print(f"Run ID: {run_id}")
-    print(f"PURSE={purse} | MAX_POSITIONS={max_pos}")
+    print(f"PURSE={purse:.2f} (tier-based allocation: HIGH={getattr(config,'ALLOC_TIER_HIGH_PCT',0.25)*100:.0f}% "
+          f"MED={getattr(config,'ALLOC_TIER_MED_PCT',0.18)*100:.0f}% "
+          f"LOW={getattr(config,'ALLOC_TIER_LOW_PCT',0.12)*100:.0f}%)")
     print(f"Rows matched for update: {len(rows)}")
 
     if not rows:
-        print("No rows need updating (already filled, or filter didn’t match).")
+        print("No rows need updating (already filled, or filter didn't match).")
         con.close()
         return
 
     updated = 0
     for r in rows:
-        rid = int(r["rid"])
-        ref_price = float(r["ref_price"] or 0)
-        qty = calc_suggested_qty(ref_price, purse, max_pos)
+        rid        = int(r["rid"])
+        ref_price  = float(r["ref_price"] or 0)
+        score      = float(r["score_total"] or 80.0)
+        confidence = float(r["confidence"] or 0.5)
+        risk_score = float(r["risk_score"] or 0.5)
+        qty = calc_suggested_qty(ref_price, purse, score, confidence, risk_score)
 
         cur.execute(
             "UPDATE recommendations SET suggested_qty = ? WHERE rowid = ?",

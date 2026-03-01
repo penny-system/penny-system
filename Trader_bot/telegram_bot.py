@@ -138,7 +138,7 @@ _pending_trade: dict = {}
 
 
 async def _get_live_stats() -> tuple:
-    """Return (purse, max_pos, active_positions, invested, owned_symbols) using live overrides + IBKR portfolio."""
+    """Return (purse, active_positions, invested, owned_symbols) using live overrides + IBKR portfolio."""
     apply_overrides_to_config(config)
 
     purse_cad = getattr(config, "TRADE_PURSE_CAD", 0) or 0
@@ -148,8 +148,6 @@ async def _get_live_stats() -> tuple:
     else:
         purse = float(getattr(config, "TRADE_PURSE_USD", 1500.0) or 1500.0)
         use_cad = False
-
-    max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
 
     _pos_fut = concurrent.futures.Future()
 
@@ -184,7 +182,7 @@ async def _get_live_stats() -> tuple:
         invested = 0.0
         owned_symbols = set()
 
-    return purse, max_pos, active, invested, owned_symbols
+    return purse, active, invested, owned_symbols
 
 
 def _fetch_bot_recs(run_id: int) -> list[dict]:
@@ -360,7 +358,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "\n"
         "⚙️ <b>Settings</b>\n"
         "/purse 3000      Set purse (CAD)\n"
-        "/maxpos 6        Set max positions\n"
         "/minpos 150      Set min position (USD)\n"
         "/showsettings    View current settings\n"
         "/resetsettings   Reset all overrides\n"
@@ -383,7 +380,6 @@ async def showsettings(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📌 Current settings (defaults overridden by runtime_overrides.json):\n"
         f"- TRADE_PURSE_CAD: {getattr(config, 'TRADE_PURSE_CAD', None)}\n"
         f"- USD_PER_CAD:     {getattr(config, 'USD_PER_CAD', None)}\n"
-        f"- MAX_POSITIONS:   {getattr(config, 'MAX_POSITIONS', None)}\n"
         f"- MIN_POSITION_USD:{getattr(config, 'MIN_POSITION_USD', None)}\n\n"
         f"Overrides file has: {overrides if overrides else 'none'}\n"
     )
@@ -421,10 +417,10 @@ async def purse(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def maxpos(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: /maxpos 6")
-        return
-    await _propose(update, "MAX_POSITIONS", context.args[0])
+    await update.message.reply_text(
+        "ℹ️ Max positions cap has been removed. Sizing is now tier-based "
+        "(HIGH/MED/LOW) with no fixed position limit — the purse is the only constraint."
+    )
 
 
 async def fx(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -588,8 +584,8 @@ async def candidates(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No BUY candidates in the latest run.")
         return
 
-    purse, max_pos, active, invested, _ = await _get_live_stats()
-    msg = fmt_buy_message(recs, purse, max_pos, active_positions=active, invested=invested)
+    purse, active, invested, _ = await _get_live_stats()
+    msg = fmt_buy_message(recs, purse, active_positions=active, invested=invested)
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
@@ -740,11 +736,11 @@ async def brief_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No candidates or watchlist entries in the latest run.")
         return
 
-    purse, max_pos, active, invested, owned = await _get_live_stats()
+    purse, active, invested, owned = await _get_live_stats()
     # Strip already-owned symbols — don't surface noise the user can't act on
     recs       = [r for r in recs       if r["symbol"] not in owned]
     watch_recs = [r for r in watch_recs if r["symbol"] not in owned]
-    msg = fmt_brief_message(recs, watch_recs, purse, max_pos, active, invested)
+    msg = fmt_brief_message(recs, watch_recs, purse, active, invested)
     await update.message.reply_text(msg, parse_mode="HTML")
 
 
@@ -881,8 +877,6 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         use_cad = False
         fx = 1.0
-    max_pos = int(getattr(config, "MAX_POSITIONS", 6) or 6)
-
     position_blocks: list[str] = []
     total_cost_usd = 0.0
     total_pnl_usd  = 0.0
@@ -972,7 +966,7 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     summary = (
         f"\n\n\n📊 <b>PORTFOLIO SUMMARY</b>\n"
         f"{DIVIDER}\n"
-        f"Total: {len(items)}/{max_pos} positions  ·  ${total_invested:,.2f} invested\n"
+        f"Total: {len(items)} positions  ·  ${total_invested:,.2f} invested\n"
         f"Net Gain: {net_flag} {net_dollar} ({net_pct_str})\n"
         f"Best today:  {best_str}\n"
         f"Worst today: {worst_str}\n"

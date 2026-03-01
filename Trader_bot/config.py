@@ -37,9 +37,6 @@ TRADE_PURSE_USD = 1500.0
 # Alias used by other scripts
 PURSE = TRADE_PURSE_USD
 
-# Maximum simultaneous open positions
-MAX_POSITIONS = 6
-
 # Minimum dollars per position (safety floor)
 MIN_POSITION_USD = 150
 
@@ -48,18 +45,27 @@ MAX_POSITION_USD = 1000
 
 
 # ============================
-# POSITION SIZING BEHAVIOR
+# ALLOCATION TIERS (sizing)
 # ============================
 
-# Risk weighting model:
-# Higher score & lower risk → larger allocation
-# Lower score / higher risk → smaller allocation
+# Thresholds to classify a BUY candidate into HIGH / MEDIUM / LOW tier.
+# All three criteria must be met (AND logic) to qualify for a tier.
+# score_total: 0-100 | confidence: 0-1 | risk_score: 0-1 (lower = safer)
 
-BASE_RISK_UNIT = 1.0
+ALLOC_TIER_HIGH_MIN_SCORE = 87.0
+ALLOC_TIER_HIGH_MIN_CONF  = 0.75
+ALLOC_TIER_HIGH_MAX_RISK  = 0.35
 
-# These adjust weight influence
-SCORE_WEIGHT = 0.6
-RISK_WEIGHT = 0.4
+ALLOC_TIER_MED_MIN_SCORE  = 83.0
+ALLOC_TIER_MED_MIN_CONF   = 0.60
+ALLOC_TIER_MED_MAX_RISK   = 0.50
+
+# % of remaining purse to allocate per candidate at each tier.
+# Candidates are processed highest-score-first; each gets its full tier %
+# of the remaining purse at the time of allocation (first-come, first-served).
+ALLOC_TIER_HIGH_PCT = 0.25   # 25% of remaining purse
+ALLOC_TIER_MED_PCT  = 0.18   # 18% of remaining purse
+ALLOC_TIER_LOW_PCT  = 0.12   # 12% of remaining purse
 
 
 # ============================

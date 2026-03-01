@@ -11,7 +11,6 @@ ALLOWED_CHAT_PATH = os.path.join(_HERE, "telegram_allowed_chat.json")
 ALLOWED_KEYS = {
     "TRADE_PURSE_CAD": float,
     "USD_PER_CAD": float,
-    "MAX_POSITIONS": int,
     "MIN_POSITION_USD": float,
 }
 
