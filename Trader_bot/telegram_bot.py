@@ -764,7 +764,7 @@ async def portfolio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             ib = IB()
             ib.connect(config.IB_HOST, config.IB_PORT, clientId=18)
-            ib.reqMarketDataType(3)  # delayed data — free, no extra subscription needed
+            ib.reqMarketDataType(getattr(config, "MARKET_DATA_TYPE", 1))
             positions = ib.reqPositions()  # explicit fresh request; awaits positionEnd
             active = [p for p in positions if p.position > 0]
 
